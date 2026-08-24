@@ -1,0 +1,11 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # Loads variables from .env
+
+api_key = os.getenv("OPENROUTER_API_KEY")
+
+if api_key:
+    print("API Key loaded successfully!")
+else:
+    print("API Key not found. Check your .env file.")
