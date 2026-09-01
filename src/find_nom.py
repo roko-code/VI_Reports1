@@ -1,3 +1,4 @@
+from fileinput import filename
 import os
 import re
 import io
@@ -145,6 +146,7 @@ def scan_today_announcements(save_dir=NOTICES_RAW_DIR):
 
     print(f"[3/3] Processing candidates across {len(candidates_by_ticker)} matching companies...")
     download_count = 0
+    saved_noms = []  # 1. Initialize list BEFORE processing companies
 
     for ticker, items in candidates_by_ticker.items():
         items.sort(key=lambda x: (not x["is_letter"], x["pages"]), reverse=True)
@@ -165,6 +167,13 @@ def scan_today_announcements(save_dir=NOTICES_RAW_DIR):
             size_kb = round(len(pdf_bytes) / 1024, 1)
             print(f"    SUCCESS: Saved {filename.relative_to(BASE_DIR)} ({size_kb} KB) [Extracted Year: {meeting_year}]")
             download_count += 1
+            
+            # 2. Append INSIDE the successful download block
+            saved_noms.append({
+                "ticker": ticker,
+                "year": meeting_year,
+                "path": filename
+            })
         else:
             print(f"    FAILED: Could not resolve binary PDF stream.")
 
@@ -174,5 +183,4 @@ def scan_today_announcements(save_dir=NOTICES_RAW_DIR):
     print(f" - Primary NoM PDFs saved to {save_dir.relative_to(BASE_DIR)}: {download_count}")
     print("=" * 60)
 
-if __name__ == "__main__":
-    scan_today_announcements()
+    return saved_noms  # 3. Return saved list to orchestrator
