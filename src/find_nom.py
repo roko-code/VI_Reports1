@@ -1,4 +1,3 @@
-from fileinput import filename
 import os
 import re
 import io
@@ -12,10 +11,6 @@ from pypdf import PdfReader
 # Base Directory Resolution
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-NOTICES_RAW_DIR = DATA_DIR / "notices" / "raw"
-
-# Ensure output directory exists
-NOTICES_RAW_DIR.mkdir(parents=True, exist_ok=True)
 
 SESSION = requests.Session()
 SESSION.headers.update({
@@ -95,8 +90,8 @@ def parse_page_count(headline_text):
     match = re.search(r'(\d+)\s+page', headline_text.lower())
     return int(match.group(1)) if match else 0
 
-def scan_today_announcements(save_dir=NOTICES_RAW_DIR):
-    """Scans daily market releases, extracts AGM year from PDF text, and saves NoMs."""
+def scan_today_announcements():
+    """Scans daily market releases, extracts AGM year from PDF text, and saves NoMs to company workspaces."""
     url = "https://www.asx.com.au/asx/v2/statistics/todayAnns.do"
     fallback_year = datetime.now().year
     
@@ -105,11 +100,11 @@ def scan_today_announcements(save_dir=NOTICES_RAW_DIR):
         response = SESSION.get(url, timeout=10)
     except Exception as e:
         print(f"Error connecting to ASX: {e}")
-        return
+        return []
 
     if response.status_code != 200:
         print(f"Connection failed. HTTP Status: {response.status_code}")
-        return
+        return []
 
     print("[2/3] Parsing announcements and grouping matches by company...")
     soup = BeautifulSoup(response.text, "html.parser")
@@ -146,7 +141,7 @@ def scan_today_announcements(save_dir=NOTICES_RAW_DIR):
 
     print(f"[3/3] Processing candidates across {len(candidates_by_ticker)} matching companies...")
     download_count = 0
-    saved_noms = []  # 1. Initialize list BEFORE processing companies
+    saved_noms = []
 
     for ticker, items in candidates_by_ticker.items():
         items.sort(key=lambda x: (not x["is_letter"], x["pages"]), reverse=True)
@@ -160,7 +155,12 @@ def scan_today_announcements(save_dir=NOTICES_RAW_DIR):
         pdf_bytes = extract_and_download_pdf(wrapper_url)
         if pdf_bytes:
             meeting_year = extract_meeting_year(pdf_bytes, fallback_year)
-            filename = save_dir / f"{ticker}_{meeting_year}_NOM.pdf"
+            
+            # Construct isolated per-company workspace target directory
+            nom_dir = DATA_DIR / "companies" / f"{ticker}_{meeting_year}" / "notices"
+            nom_dir.mkdir(parents=True, exist_ok=True)
+            
+            filename = nom_dir / f"{ticker}_{meeting_year}_NOM.pdf"
             
             with open(filename, "wb") as f:
                 f.write(pdf_bytes)
@@ -168,7 +168,6 @@ def scan_today_announcements(save_dir=NOTICES_RAW_DIR):
             print(f"    SUCCESS: Saved {filename.relative_to(BASE_DIR)} ({size_kb} KB) [Extracted Year: {meeting_year}]")
             download_count += 1
             
-            # 2. Append INSIDE the successful download block
             saved_noms.append({
                 "ticker": ticker,
                 "year": meeting_year,
@@ -180,7 +179,10 @@ def scan_today_announcements(save_dir=NOTICES_RAW_DIR):
     print("\n" + "=" * 60)
     print("DAILY SCAN SUMMARY:")
     print(f" - Total market announcements scanned: {scanned_count}")
-    print(f" - Primary NoM PDFs saved to {save_dir.relative_to(BASE_DIR)}: {download_count}")
+    print(f" - Primary NoM PDFs saved across company workspaces: {download_count}")
     print("=" * 60)
 
-    return saved_noms  # 3. Return saved list to orchestrator
+    return saved_noms
+
+if __name__ == "__main__":
+    scan_today_announcements()
