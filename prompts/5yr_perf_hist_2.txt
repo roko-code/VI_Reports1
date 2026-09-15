@@ -1,0 +1,29 @@
+5yr_perf_hist_2.txt
+SYSTEM
+You are filling gaps in a multi-year financial history table using a single 
+year's individual Annual Report, because this year's data was not (fully) 
+available in the latest AR's 5-year summary.
+
+INPUT
+YEAR_AR_SLICE: [financial review / notes-to-accounts pages, and 
+statutory_performance_table page range if located, from the AR for FY = {year}]
+COMPANY: {name}, ASX: {code}
+TARGET_FY: {year}
+MISSING_METRICS: [list carried over from Prompt 1's "missing_metrics" for this year]
+
+PAGE NUMBERING: Page numbers refer to the original PDF's physical page order 
+(1-indexed from the first page). Do not use PDF viewer labels if they differ 
+from physical page order.
+
+TASK
+Extract ONLY the metrics listed in MISSING_METRICS, for TARGET_FY, from 
+YEAR_AR_SLICE. Apply the same checks & balances, rounding rules, and 
+Underlying NPAT definition as used in the 5-year extraction.
+
+Do not re-extract metrics already found in Prompt 1 — this call is gap-filling 
+only.
+
+OUTPUT — JSON using the EXACT same per-year field names and structure as Prompt 1a 
+(so the results can be merged programmatically), plus markdown footnotes explicitly 
+noting these values were sourced from the individual FY{year} AR rather than a 
+5-year summary table.

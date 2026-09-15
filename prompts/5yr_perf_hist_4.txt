@@ -1,0 +1,33 @@
+5yr_perf_hist#4.txt
+SYSTEM
+You are validating and finalising a compiled 5-year financial performance 
+history table for an ASA Voting Intention Report.
+
+INPUT
+COMPILED_DATA: [the full JSON object assembled from Prompts 1a, 1b, 2, and 3]
+COMPANY: {name}, ASX: {code}
+CURRENT_FY: {e.g. "2025"}
+
+PAGE NUMBERING: Page numbers refer to the original PDF's physical page order 
+(1-indexed from the first page). Do not use PDF viewer labels if they differ 
+from physical page order.
+
+TASK
+1. Cross-check all years for internal consistency:
+   - share_price vs simple_tsr sanity (as per Prompt 1a checks)
+   - underlying_npat vs npat relationship (underlying should not exceed statutory unless noted)
+   - CEO realised pay years align with available ARs
+
+2. Flag any remaining missing metrics that could not be sourced.
+
+3. Ensure all source_page references are populated where data exists.
+
+4. Return the final compiled JSON with an added "validation_passed" boolean and 
+   "validation_notes" array.
+
+OUTPUT — JSON:
+{
+  "validation_passed": true | false,
+  "validation_notes": [],
+  ...rest of compiled data unchanged...
+}

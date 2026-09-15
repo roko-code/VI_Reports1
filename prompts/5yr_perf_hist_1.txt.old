@@ -1,0 +1,90 @@
+5yr_perf_hist#1.txt
+SYSTEM
+You are extracting historical financial data for an ASA Voting Intention Report. 
+Accuracy and traceability matter more than completeness — never guess a value, 
+and always cite where it came from.
+
+INPUT
+LATEST_AR_5YR_SLICE: [the five_year_summary_table page range from the current-year 
+Annual Report]
+COMPANY: {name}, ASX: {code}
+CURRENT_FY: {e.g. "2025"}
+
+TASK
+Locate the multi-year "Key Financial Data" / "5 Year Summary" / "Financial 
+History" table. If no such table exists in the provided slice, stop and return 
+"table_found": false immediately — do not attempt to reconstruct one from other 
+data.
+
+If found, extract for every year shown:
+- npat (statutory, $m)
+- underlying_npat ($m) — see definition below
+- share_price ($, as at FY end, AS DISCLOSED — do not round)
+- dividend (cents/share, AS DISCLOSED — do not round)
+- simple_tsr (%) — only if reported directly; do not calculate here
+- eps (cents, AS DISCLOSED — do not round)
+- revenue, net_assets, roe, roce ($m/%, optional — only if present)
+
+Do NOT extract CEO remuneration in this prompt — that is handled separately and 
+always sourced from the individual FY's Remuneration Report.
+
+CHECKS & BALANCES (mandatory)
+1. Column-Header Anchor Rule: Before recording any value, state internally which 
+   year's column you are reading and confirm the header matches.
+2. TSR Sanity Check: If share_price is unchanged from the prior year but 
+   simple_tsr is non-zero, or a large price movement is not reflected in 
+   simple_tsr, set "tsr_mismatch": true for that year.
+3. Comparative Value Audit: If the same share_price repeats across two 
+   consecutive years, do not silently accept it — set 
+   "repeated_value_flag": true and add a footnote confirming you checked this 
+   isn't a table-alignment error.
+
+UNDERLYING NPAT DEFINITION
+Look for "Underlying Results", "NPAT excluding Notable Items", "Underlying 
+Operational Earnings" or equivalent. If genuinely not disclosed for a year, set 
+underlying_npat equal to npat and footnote: "Underlying NPAT not separately 
+disclosed; NPAT (statutory) used."
+
+SHARE PRICE RESTATEMENT
+If prior-year prices are restated to a Theoretical Ex-Rights Price (TERP) 
+following a capital raising, record the restated value and footnote the original 
+figure plus which years were adjusted.
+
+VALUE PRECISION
+Extract every numeric value exactly as disclosed in the source (do not round, 
+truncate, or reformat). Record the number of decimal places used in the source 
+alongside the value if it's ambiguous. All display rounding is handled 
+downstream — this is not your task.
+
+OUTPUT — BOTH:
+
+1. JSON:
+{
+  "company": "...", "asx_code": "...",
+  "table_found": true | false,
+  "years": {
+    "<FY>": {
+      "npat": null, "npat_source_page": null,
+      "underlying_npat": null, "underlying_npat_source_page": null,
+      "underlying_npat_basis_note": "",
+      "share_price": null, "share_price_source_page": null,
+      "share_price_restated": false, "share_price_restatement_note": "",
+      "dividend": null, "dividend_source_page": null,
+      "simple_tsr": null, "simple_tsr_source_page": null, "tsr_mismatch": false,
+      "eps": null, "eps_source_page": null,
+      "revenue": null, "net_assets": null, "roe": null, "roce": null,
+      "repeated_value_flag": false,
+      "extracted_from_latest_ar": true,
+      "missing_metrics": []
+    }
+  }
+}
+If table_found is false, return only {"table_found": false, "company": "...", 
+"asx_code": "..."} and stop.
+
+2. Markdown table + numbered footnotes citing exact source page and calculation 
+basis for every value. Escape every dollar sign (\$).
+
+Any metric absent from the table for a given year: null in JSON, listed in that 
+year's "missing_metrics", footnoted "Not disclosed in 5-year summary table — 
+requires individual AR."

@@ -6,6 +6,7 @@ from pathlib import Path
 import pypdf
 from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
+from logging_utils import write_supporting_text
 
 # Environment setup
 load_dotenv(find_dotenv())
@@ -14,29 +15,16 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not API_KEY:
     raise ValueError("OPENROUTER_API_KEY not found in .env file.")
 
-# Model Configurations (Clean OpenRouter IDs)
-PRIMARY_MODEL = os.getenv("PRIMARY_MODEL", "stealth/ox-alpha")
-FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "google/gemini-2.0-flash-exp:free")
+# Model Configurations (Clean OpenRouter IDs, stage-specific env vars)
+DIRECTOR_ASSESS_PRIMARY_MODEL = os.getenv("DIRECTOR_ASSESS_PRIMARY_MODEL", "stealth/ox-alpha")
+DIRECTOR_ASSESS_FALLBACK_MODEL = os.getenv("DIRECTOR_ASSESS_FALLBACK_MODEL", "google/gemini-2.0-flash-exp:free")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
 DATA_DIR = BASE_DIR / "data"
 
-# Domain-specific directory structure
+# Domain-specific directory structure (shared reference docs at project level)
 ASA_GUIDELINES_DIR = DATA_DIR / "asa_guidelines"
-NOM_JSON_DIR = DATA_DIR / "extracted_json" / "notices"
-NOM_JSON_ARCHIVE_DIR = DATA_DIR / "extracted_json" / "notices_archived"
-AR_RAW_DIR = DATA_DIR / "annual_reports" / "raw"
-AR_PROCESSED_DIR = DATA_DIR / "annual_reports" / "processed"
-REPORTS_DIR = DATA_DIR / "reports"
-FAILED_DIR = DATA_DIR / "failed"
-
-# Directory initialization
-for folder in [
-    PROMPTS_DIR, ASA_GUIDELINES_DIR, NOM_JSON_DIR, NOM_JSON_ARCHIVE_DIR,
-    AR_RAW_DIR, AR_PROCESSED_DIR, REPORTS_DIR, FAILED_DIR
-]:
-    folder.mkdir(parents=True, exist_ok=True)
 
 
 def load_prompt(filename: str) -> str:
@@ -80,24 +68,24 @@ def has_director_resolutions(nom_data: dict) -> bool:
     return False
 
 
-def find_matching_ar(json_stem: str) -> Path:
+def find_matching_ar(json_stem: str, ar_dir: Path) -> Path:
     """Matches NoM JSON (e.g. BHP_2026_NOM) with raw AR PDF (e.g. BHP_2026_AR.pdf)."""
     prefix = json_stem.replace("_NOM", "").replace("_nom", "")
-    
-    ar_files = list(AR_RAW_DIR.glob("*.pdf"))
+
+    ar_files = list(ar_dir.glob("*.pdf"))
     for ar_file in ar_files:
         if prefix.lower() in ar_file.stem.lower():
             return ar_file
-            
+
     return None
 
 
-def call_llm_with_fallback(client: OpenAI, system_prompt: str, user_payload: str) -> str:
+def call_llm_with_fallback(client: OpenAI, system_prompt: str, user_payload: str, logger=None) -> str:
     """
     Executes API requests using OpenRouter's native web search server tool:
-    1. PRIMARY_MODEL + openrouter:web_search tool
-    2. FALLBACK_MODEL + openrouter:web_search tool
-    3. FALLBACK_MODEL (Standard generation without web search tool)
+    1. DIRECTOR_ASSESS_PRIMARY_MODEL + openrouter:web_search tool
+    2. DIRECTOR_ASSESS_FALLBACK_MODEL + openrouter:web_search tool
+    3. DIRECTOR_ASSESS_FALLBACK_MODEL (Standard generation without web search tool)
     """
     messages = [
         {"role": "system", "content": system_prompt},
@@ -107,48 +95,61 @@ def call_llm_with_fallback(client: OpenAI, system_prompt: str, user_payload: str
 
     # --- Attempt 1: Primary Model + Native Web Search Tool ---
     try:
-        print(f" Requesting assessment via primary model ({PRIMARY_MODEL}) with Web Search...")
+        print(f" Requesting assessment via primary model ({DIRECTOR_ASSESS_PRIMARY_MODEL}) with Web Search...")
+        if logger:
+            logger.info(f"Requesting assessment via primary model ({DIRECTOR_ASSESS_PRIMARY_MODEL}) with Web Search...")
         response = client.chat.completions.create(
-            model=PRIMARY_MODEL,
+            model=DIRECTOR_ASSESS_PRIMARY_MODEL,
             messages=messages,
             tools=web_search_tool
         )
         return response.choices[0].message.content.strip()
     except Exception as err1:
         print(f" Primary model with web search tool failed: {err1}")
+        if logger:
+            logger.warning(f"Primary model with web search tool failed: {err1}")
 
     # --- Attempt 2: Fallback Model + Native Web Search Tool ---
     try:
-        print(f" Switching to fallback model ({FALLBACK_MODEL}) with Web Search...")
+        print(f" Switching to fallback model ({DIRECTOR_ASSESS_FALLBACK_MODEL}) with Web Search...")
+        if logger:
+            logger.info(f"Switching to fallback model ({DIRECTOR_ASSESS_FALLBACK_MODEL}) with Web Search...")
         response = client.chat.completions.create(
-            model=FALLBACK_MODEL,
+            model=DIRECTOR_ASSESS_FALLBACK_MODEL,
             messages=messages,
             tools=web_search_tool
         )
         return response.choices[0].message.content.strip()
     except Exception as err2:
         print(f" Fallback model with web search tool failed: {err2}")
+        if logger:
+            logger.warning(f"Fallback model with web search tool failed: {err2}")
 
     # --- Attempt 3: Standard Fallback (No Web Search) ---
-    print(f" Executing standard assessment via {FALLBACK_MODEL} (No Web Search)...")
+    print(f" Executing standard assessment via {DIRECTOR_ASSESS_FALLBACK_MODEL} (No Web Search)...")
+    if logger:
+        logger.info(f"Executing standard assessment via {DIRECTOR_ASSESS_FALLBACK_MODEL} (No Web Search)...")
     response = client.chat.completions.create(
-        model=FALLBACK_MODEL,
+        model=DIRECTOR_ASSESS_FALLBACK_MODEL,
         messages=messages
     )
     return response.choices[0].message.content.strip()
 
 
-def run_director_assessment(json_path: Path, ar_path: Path, asa_text: str, client: OpenAI, system_prompt: str):
+def run_director_assessment(json_path: Path, ar_path: Path, asa_text: str, client: OpenAI, system_prompt: str, reports_dir: Path, supporting_data_dir: Path = None, logger=None, archive_dir: Path = None):
     """Executes LLM evaluation using JSON, Annual Report, and ASA Guidelines."""
+    if logger:
+        logger.info(f"Processing Director Assessment for: {json_path.name} + {ar_path.name}")
     print(f"\nProcessing Director Assessment for: {json_path.name} + {ar_path.name}")
-    
+
     with open(json_path, "r", encoding="utf-8") as f:
         nom_data = json.load(f)
 
     if not has_director_resolutions(nom_data):
         print(" Skipping: No director election/re-election resolutions detected in JSON.")
-        shutil.move(str(json_path), str(NOM_JSON_ARCHIVE_DIR / json_path.name))
-        return
+        if logger:
+            logger.info(f"Skipping {json_path.name}: no director resolutions detected")
+        return False
 
     ar_text = extract_pdf_text(ar_path)
 
@@ -161,7 +162,16 @@ def run_director_assessment(json_path: Path, ar_path: Path, asa_text: str, clien
         f"{ar_text}"
     )
 
-    result_md = call_llm_with_fallback(client, system_prompt, user_payload)
+    if logger:
+        logger.info(f"Requesting LLM assessment for {json_path.name} via {DIRECTOR_ASSESS_PRIMARY_MODEL}")
+
+    result_md = call_llm_with_fallback(client, system_prompt, user_payload, logger)
+
+    # Save raw LLM response to supporting data
+    if supporting_data_dir:
+        write_supporting_text(supporting_data_dir, f"{json_path.stem}_raw_llm.txt", result_md)
+        if logger:
+            logger.info(f"Raw LLM response saved for {json_path.name}")
 
     # Clean up markdown code blocks if wrapped by the model
     if result_md.startswith("```markdown"):
@@ -171,26 +181,49 @@ def run_director_assessment(json_path: Path, ar_path: Path, asa_text: str, clien
 
     # Save Markdown report output
     report_filename = f"{json_path.stem}_Director_Evaluation.md"
-    report_path = REPORTS_DIR / report_filename
+    report_path = reports_dir / report_filename
     report_path.write_text(result_md, encoding="utf-8")
     print(f" Report saved -> {report_path.relative_to(BASE_DIR)}")
+    if logger:
+        logger.info(f"Report saved: {report_path.name}")
 
     # Move processed inputs to archive directories
-    shutil.move(str(json_path), str(NOM_JSON_ARCHIVE_DIR / json_path.name))
-    shutil.move(str(ar_path), str(AR_PROCESSED_DIR / ar_path.name))
-    print(f" Archived inputs to processed directories.")
+    if archive_dir:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(json_path), str(archive_dir / json_path.name))
+        print(f" Archived inputs to processed directories.")
+        if logger:
+            logger.info(f"Archived {json_path.name} to notices_archived")
+    return True
 
 
-def run_pipeline():
+def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=None) -> bool:
     system_prompt = load_prompt("director_assess.txt")
     asa_text = load_asa_guidelines()
 
-    json_files = list(NOM_JSON_DIR.glob("*.json"))
+    extracted_json_dir = workspace_dir / "extracted_json"
+    workspace_nom_json_dir = extracted_json_dir / "notices"
+    workspace_nom_json_archive_dir = extracted_json_dir / "notices_archived"
+    annual_reports_dir = workspace_dir / "annual_reports"
+    workspace_reports_dir = workspace_dir / "reports"
+    failed_dir = workspace_dir / "failed"
+
+    for folder in [
+        extracted_json_dir, workspace_nom_json_dir, workspace_nom_json_archive_dir,
+        annual_reports_dir, workspace_reports_dir, failed_dir
+    ]:
+        folder.mkdir(parents=True, exist_ok=True)
+
+    json_files = list(workspace_nom_json_dir.glob("*.json"))
     if not json_files:
-        print(f"No pending NoM JSON files found in {NOM_JSON_DIR.relative_to(BASE_DIR)}")
-        return
+        print(f"No pending NoM JSON files found in {workspace_nom_json_dir.relative_to(BASE_DIR)}")
+        if logger:
+            logger.warning("No pending NoM JSON files found")
+        return False
 
     print(f"Found {len(json_files)} JSON file(s) for evaluation.")
+    if logger:
+        logger.info(f"Found {len(json_files)} JSON file(s) for evaluation")
 
     # Initialize OpenAI client with OpenRouter Base URL
     client = OpenAI(
@@ -198,18 +231,41 @@ def run_pipeline():
         api_key=API_KEY
     )
 
+    success_count = 0
     for json_path in json_files:
-        ar_path = find_matching_ar(json_path.stem)
+        ar_path = find_matching_ar(json_path.stem, annual_reports_dir)
         if not ar_path:
-            print(f" Warning: No matching Annual Report found in {AR_RAW_DIR.relative_to(BASE_DIR)} for {json_path.name}. Skipping.")
+            print(f" Warning: No matching Annual Report found in {annual_reports_dir.relative_to(BASE_DIR)} for {json_path.name}. Skipping.")
+            if logger:
+                logger.warning(f"No matching AR found for {json_path.name}")
             continue
 
         try:
-            run_director_assessment(json_path, ar_path, asa_text, client, system_prompt)
+            result = run_director_assessment(json_path, ar_path, asa_text, client, system_prompt, workspace_reports_dir, supporting_data_dir, logger, workspace_nom_json_archive_dir)
+            if result:
+                success_count += 1
         except Exception as e:
+            if logger:
+                logger.error(f"Error executing assessment for {json_path.name}: {e}")
             print(f" Error executing assessment for {json_path.name}: {e}")
-            shutil.move(str(json_path), str(FAILED_DIR / json_path.name))
+            shutil.move(str(json_path), str(failed_dir / json_path.name))
+
+    if success_count == 0:
+        print(" Stage 6 complete: 0 assessments completed.")
+        if logger:
+            logger.warning("Stage 6 complete: 0 assessments completed")
+        return False
+
+    print(f" Stage 6 complete: {success_count} assessment(s) completed.")
+    if logger:
+        logger.info(f"Stage 6 complete: {success_count} assessment(s) completed")
+    return True
 
 
 if __name__ == "__main__":
-    run_pipeline()
+    import sys
+    if len(sys.argv) >= 2:
+        run_pipeline(Path(sys.argv[1]))
+    else:
+        print("Usage: python src/director_assess.py <workspace_dir>")
+        print("Example: python src/director_assess.py data/companies/BHP_2026")

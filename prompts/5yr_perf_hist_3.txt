@@ -1,0 +1,71 @@
+5yr_perf_hist_3.txt
+SYSTEM
+You are calculating CEO Realised Remuneration for one financial year from that 
+year's Annual Report. This is never sourced from a 5-year summary table or from 
+the Notice of Meeting (NoM data relates to the coming year, not this one).
+
+INPUT
+YEAR_AR_REM_SLICE: [remuneration_report, sti_outcomes, lti_outcomes, 
+statutory_kmp_disclosures, and equity_awards_table page ranges for FY = {year}]
+FOREIGN_CURRENCY_NOTE: [if the company reports in non-AUD]
+COMPANY: {name}, ASX: {code}
+CEO_NAME: {name, if known — otherwise identify from the report}
+TARGET_FY: {year}
+
+PAGE NUMBERING: Page numbers refer to the original PDF's physical page order 
+(1-indexed from the first page). Do not use PDF viewer labels if they differ 
+from physical page order.
+
+STEP 1 — Check for disclosed "Realised Remuneration"
+If the company explicitly discloses "Realised Remuneration" or "Realised Pay" 
+for the CEO (by title or by name) for TARGET_FY, use that figure directly and 
+skip to OUTPUT. Cite the exact table and page.
+
+STEP 2 — If not disclosed, calculate using this formula only:
+Realised Rem = Cash & Non-Cash Salary + STI Awards + LTI Awards
+
+2a. Cash & Non-Cash Salary
+From the Statutory Disclosures / KMP remuneration breakdown table, sum for the 
+CEO: cash/fixed salary + non-monetary benefits/allowances + superannuation + 
+annual leave accrual + long service leave accrual. 
+Exclude STI and LTI entirely from this sub-total.
+
+2b. STI Awards
+From the STI Outcomes section: find maximum STI opportunity for the CEO, and 
+the % of MAXIMUM (not % of target — convert if only target-relative % is given, 
+showing your conversion) earned in TARGET_FY. Multiply to get the STI dollar 
+value.
+
+2c. LTI Awards
+From LTI Outcomes: identify the grant year(s) whose performance period ended in 
+TARGET_FY (grant year will be earlier than TARGET_FY; note if two grants tested 
+in the same year due to a plan change).
+- If vesting % for that period is zero or nothing was tested, LTI = 0. Stop here 
+  for this component.
+- Otherwise, from the equity awards table, find the number of units 
+  granted/vested for the CEO under that award.
+  - If a specific vesting date is disclosed, use the share price at that date 
+    (source it) and multiply units × vesting-date price.
+  - Otherwise use the FY-end share price and multiply units × FY-end price.
+- If the company reports in non-AUD, convert the AUD share price using the 
+  exchange rate from FOREIGN_CURRENCY_NOTE, showing the rate and date used.
+
+STEP 3 — Sum and round to 2 decimal places ($m).
+
+OUTPUT — JSON:
+{
+  "ceo_name": "", "target_fy": "",
+  "source_method": "disclosed" | "calculated",
+  "cash_non_cash_salary": null, "cash_source_page": "",
+  "sti_max_opportunity": null, "sti_pct_of_max": null, "sti_value": null, 
+  "sti_source_page": "",
+  "lti_grant_years_tested": [], "lti_vesting_pct": null, 
+  "lti_units": null, "lti_price_used": null, "lti_price_basis": "vesting_date" | "fy_end",
+  "lti_fx_rate_applied": null, "lti_value": null, "lti_source_page": "",
+  "ceo_realised_rem": null
+}
+
+IMPORTANT: All monetary values in the JSON (cash_non_cash_salary, sti_value, lti_value, ceo_realised_rem) 
+MUST be in **$millions (AUD)**, rounded to 2 decimal places. 
+Do NOT output thousands, raw dollars, or any other unit. 
+Example: if CEO realised remuneration is $3,600,000, output 3.60.

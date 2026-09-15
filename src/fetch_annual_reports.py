@@ -65,14 +65,14 @@ def safe_goto(page: Page, context: BrowserContext, url: str, max_retries: int = 
             page = context.new_page()
     return page
 
-def fetch_annual_reports(ticker: str, target_year: int, count: int = 5) -> dict:
+def fetch_annual_reports(ticker: str, target_year: int, count: int = 5, supporting_data_dir: Path = None, logger=None) -> tuple:
     ticker = ticker.upper()
     all_codes = [ticker]
-    
+
     company_dir = DATA_DIR / f"{ticker}_{target_year}"
     ar_dir = company_dir / "annual_reports"
     ar_dir.mkdir(parents=True, exist_ok=True)
-    
+
     target_years = list(range(target_year - count + 1, target_year + 1))
     required_years = set(target_years)
     downloaded_files = {}
@@ -185,7 +185,13 @@ def fetch_annual_reports(ticker: str, target_year: int, count: int = 5) -> dict:
                                 
                                 headline_year_match = re.search(r"\b(202[0-9])\b", cand["headline"])
                                 if headline_year_match:
-                                    report_year = int(headline_year_match.group(1))
+                                    headline_year = int(headline_year_match.group(1))
+                                    # Headline may reference a fiscal-year range (e.g., "2024-2025 Annual Report")
+                                    # published in the announcement year. Prefer the publication year.
+                                    if headline_year == cand["pub_year"]:
+                                        report_year = headline_year
+                                    else:
+                                        report_year = cand["pub_year"]
                                 else:
                                     report_year = cand["pub_year"]
 
@@ -222,12 +228,19 @@ def fetch_annual_reports(ticker: str, target_year: int, count: int = 5) -> dict:
 
     if required_years:
         print(f"\n[Notice] Could not find Annual Reports for years: {sorted(list(required_years))}")
+        return False, all_codes
 
-    return downloaded_files
+    print(f"\n[Stage 2] All {count} Annual Reports acquired successfully.")
+    return True, all_codes
 
 if __name__ == "__main__":
     ticker_arg = sys.argv[1] if len(sys.argv) > 1 else "DNL"
     year_arg = int(sys.argv[2]) if len(sys.argv) > 2 else 2026
-    
-    results = fetch_annual_reports(ticker=ticker_arg, target_year=year_arg)
-    print(f"\nExecution finished. Downloaded {len(results)} files.")
+
+    success, codes = fetch_annual_reports(ticker=ticker_arg, target_year=year_arg)
+    if codes:
+        print(f"\nLegacy codes discovered: {codes}")
+    if success:
+        print("\nExecution finished successfully.")
+    else:
+        print("\nExecution finished with missing reports.")
