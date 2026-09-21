@@ -9,6 +9,7 @@ from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
 
 from logging_utils import write_supporting_json, write_supporting_text
+from ar_text_cache import get_ar_pages
 
 load_dotenv(find_dotenv())
 
@@ -16,11 +17,165 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not API_KEY:
     raise ValueError("OPENROUTER_API_KEY not found in .env file.")
 
-PERFORMANCE_MODEL = os.getenv("PERFORMANCE_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
-PERFORMANCE_FALLBACK_MODEL = os.getenv("PERFORMANCE_FALLBACK_MODEL", "poolside/laguna-s-2.1:free")
+PERFORMANCE_MODEL = os.getenv("PERFORMANCE_MODEL", "openai/gpt-4.1-mini")
+PERFORMANCE_FALLBACK_MODEL = os.getenv("PERFORMANCE_FALLBACK_MODEL", "google/gemini-3.1-flash-lite")
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Token bucket rate limiter: 18 RPM = 0.3 RPS, so ~3.33s between requests
+# JSON Schemas for LLM response validation
+PROMPT_1A_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "company": {"type": "string"},
+        "asx_code": {"type": "string"},
+        "table_found": {"type": "boolean"},
+        "extraction_confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "years": {
+            "type": "object",
+            "patternProperties": {
+                "^\\d{4}$": {
+                    "type": "object",
+                    "properties": {
+                        "npat": {"type": ["number", "string", "null"]},
+                        "npat_source_page": {"type": ["integer", "string", "null"]},
+                        "underlying_npat": {"type": ["number", "string", "null"]},
+                        "underlying_npat_source_page": {"type": ["integer", "string", "null"]},
+                        "underlying_npat_basis_note": {"type": "string"},
+                        "share_price": {"type": ["number", "string", "null"]},
+                        "share_price_source_page": {"type": ["integer", "string", "null"]},
+                        "share_price_restated": {"type": "boolean"},
+                        "share_price_restatement_note": {"type": "string"},
+                        "dividend": {"type": ["number", "string", "null"]},
+                        "dividend_source_page": {"type": ["integer", "string", "null"]},
+                        "simple_tsr": {"type": ["number", "string", "null"]},
+                        "simple_tsr_source_page": {"type": ["integer", "string", "null"]},
+                        "tsr_mismatch": {"type": "boolean"},
+                        "eps": {"type": ["number", "string", "null"]},
+                        "eps_source_page": {"type": ["integer", "string", "null"]},
+                        "revenue": {"type": ["number", "string", "null"]},
+                        "net_assets": {"type": ["number", "string", "null"]},
+                        "roe": {"type": ["number", "string", "null"]},
+                        "roce": {"type": ["number", "string", "null"]},
+                        "repeated_value_flag": {"type": "boolean"},
+                        "extracted_from_latest_ar": {"type": "boolean"},
+                        "missing_metrics": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "additionalProperties": False
+                }
+            },
+            "additionalProperties": False
+        }
+    },
+    "required": ["company", "asx_code", "table_found", "extraction_confidence", "years"]
+}
+
+PROMPT_1B_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "share_price_overrides": {
+            "type": "object",
+            "patternProperties": {
+                "^\\d{4}$": {
+                    "type": "object",
+                    "properties": {
+                        "share_price": {"type": ["number", "string", "null"]},
+                        "share_price_source_page": {"type": ["integer", "string", "null"]},
+                        "share_price_restated": {"type": "boolean"},
+                        "share_price_restatement_note": {"type": "string"}
+                    },
+                    "additionalProperties": False
+                }
+            },
+            "additionalProperties": False
+        }
+    },
+    "required": ["share_price_overrides"]
+}
+
+PROMPT_2_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "years": {
+            "type": "object",
+            "patternProperties": {
+                "^\\d{4}$": {
+                    "type": "object",
+                    "properties": {
+                        "npat": {"type": ["number", "string", "null"]},
+                        "npat_source_page": {"type": ["integer", "string", "null"]},
+                        "underlying_npat": {"type": ["number", "string", "null"]},
+                        "underlying_npat_source_page": {"type": ["integer", "string", "null"]},
+                        "underlying_npat_basis_note": {"type": "string"},
+                        "share_price": {"type": ["number", "string", "null"]},
+                        "share_price_source_page": {"type": ["integer", "string", "null"]},
+                        "share_price_restated": {"type": "boolean"},
+                        "share_price_restatement_note": {"type": "string"},
+                        "dividend": {"type": ["number", "string", "null"]},
+                        "dividend_source_page": {"type": ["integer", "string", "null"]},
+                        "simple_tsr": {"type": ["number", "string", "null"]},
+                        "simple_tsr_source_page": {"type": ["integer", "string", "null"]},
+                        "tsr_mismatch": {"type": "boolean"},
+                        "eps": {"type": ["number", "string", "null"]},
+                        "eps_source_page": {"type": ["integer", "string", "null"]},
+                        "revenue": {"type": ["number", "string", "null"]},
+                        "net_assets": {"type": ["number", "string", "null"]},
+                        "roe": {"type": ["number", "string", "null"]},
+                        "roce": {"type": ["number", "string", "null"]},
+                        "repeated_value_flag": {"type": "boolean"},
+                        "extracted_from_latest_ar": {"type": "boolean"},
+                        "missing_metrics": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "additionalProperties": False
+                }
+            },
+            "additionalProperties": False
+        }
+    },
+    "required": ["years"]
+}
+
+PROMPT_3_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ceo_name": {"type": "string"},
+        "target_fy": {"type": "string"},
+        "source_method": {"type": "string", "enum": ["disclosed", "calculated"]},
+        "cash_non_cash_salary": {"type": ["number", "string", "null"]},
+        "cash_source_page": {"type": ["integer", "string", "null"]},
+        "sti_max_opportunity": {"type": ["number", "string", "null"]},
+        "sti_pct_of_max": {"type": ["number", "string", "null"]},
+        "sti_value": {"type": ["number", "string", "null"]},
+        "sti_source_page": {"type": ["integer", "string", "null"]},
+        "lti_grant_years_tested": {"type": "array", "items": {"type": "string"}},
+        "lti_vesting_pct": {"type": ["number", "string", "null"]},
+        "lti_units": {"type": ["number", "string", "null"]},
+        "lti_price_used": {"type": ["number", "string", "null"]},
+        "lti_price_basis": {"type": "string", "enum": ["vesting_date", "fy_end"]},
+        "lti_fx_rate_applied": {"type": ["number", "string", "null"]},
+        "lti_value": {"type": ["number", "string", "null"]},
+        "lti_source_page": {"type": ["integer", "string", "null"]},
+        "ceo_realised_rem": {"type": ["number", "string", "null"]}
+    },
+    "required": ["ceo_name", "target_fy", "source_method", "ceo_realised_rem"]
+}
+
+PROMPT_4_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "validation_passed": {"type": "boolean"},
+        "validation_notes": {"type": "array", "items": {"type": "string"}}
+    },
+    "required": ["validation_passed", "validation_notes"]
+}
+
+SCHEMA_MAP = {
+    "prompt_1a": "PROMPT_1A_SCHEMA",
+    "prompt_1b": "PROMPT_1B_SCHEMA",
+    "prompt_2_fy": "PROMPT_2_SCHEMA",
+    "prompt_3_fy": "PROMPT_3_SCHEMA",
+    "prompt_4": "PROMPT_4_SCHEMA",
+}
+
+# Token bucket rate limiter: 20 RPM = 3s between calls
 class TokenBucket:
     def __init__(self, rate_per_minute: int = 18):
         self.rate = rate_per_minute / 60.0  # requests per second
@@ -42,8 +197,91 @@ class TokenBucket:
         time.sleep(wait)
         return wait
 
-_token_bucket = TokenBucket(20)  # 20 RPM = 3s between calls, OpenRouter free tier limit
+_token_bucket = TokenBucket(20)  # 20 RPM = 3s between calls
 PROMPTS_DIR = BASE_DIR / "prompts"
+
+# Response format capability cache
+_RESPONSE_FORMAT_SUPPORT = {}
+
+def _get_schema_for_call(call_name: str):
+    """Get schema for call_name, handling prompt_2_fyXXX and prompt_3_fyXXX patterns."""
+    if call_name in SCHEMA_MAP:
+        return globals()[SCHEMA_MAP[call_name]]
+    if call_name.startswith("prompt_2_fy"):
+        return PROMPT_2_SCHEMA
+    if call_name.startswith("prompt_3_fy"):
+        return PROMPT_3_SCHEMA
+    return None
+
+def _check_response_format_support(model: str) -> bool:
+    """Check if model supports response_format via OpenRouter."""
+    if model in _RESPONSE_FORMAT_SUPPORT:
+        return _RESPONSE_FORMAT_SUPPORT[model]
+    
+    # For now, only enable strict mode for models we know support it with simple schemas
+    # The complex nested schemas with patternProperties don't work in strict mode
+    supports = model.startswith("openai/gpt-4.1") or model.startswith("openai/gpt-4o")
+    _RESPONSE_FORMAT_SUPPORT[model] = supports
+    return supports
+
+def _schema_supports_strict_mode(call_name: str) -> bool:
+    """Check if the schema for this call_name supports strict mode."""
+    # Only prompt_4 has a simple enough schema for strict mode
+    return call_name == "prompt_4"
+
+def _validate_against_schema(data: dict, schema: dict) -> tuple[bool, list[str]]:
+    """Validate data against JSON schema. Returns (is_valid, errors)."""
+    try:
+        import jsonschema
+        jsonschema.validate(instance=data, schema=schema)
+        return True, []
+    except ImportError:
+        # If jsonschema not available, do basic validation
+        return _basic_validate(data, schema)
+    except Exception as e:
+        return False, [str(e)]
+
+def _basic_validate(data: dict, schema: dict) -> tuple[bool, list[str]]:
+    """Basic validation without jsonschema library."""
+    errors = []
+    required = schema.get("required", [])
+    for field in required:
+        if field not in data:
+            errors.append(f"Missing required field: {field}")
+    
+    props = schema.get("properties", {})
+    for key, value in data.items():
+        if key in props:
+            prop_schema = props[key]
+            expected_type = prop_schema.get("type")
+            if expected_type:
+                if isinstance(expected_type, list):
+                    if not any(_check_type(value, t) for t in expected_type):
+                        errors.append(f"Field '{key}': expected one of {expected_type}, got {type(value).__name__}")
+                elif not _check_type(value, expected_type):
+                    errors.append(f"Field '{key}': expected {expected_type}, got {type(value).__name__}")
+    
+    return len(errors) == 0, errors
+
+def _check_type(value, expected_type: str) -> bool:
+    """Check if value matches expected type."""
+    type_map = {
+        "string": str,
+        "number": (int, float),
+        "integer": int,
+        "boolean": bool,
+        "array": list,
+        "object": dict,
+        "null": type(None),
+    }
+    expected = type_map.get(expected_type)
+    if expected is None:
+        return True
+    return isinstance(value, expected)
+    prompt_path = PROMPTS_DIR / filename
+    if not prompt_path.exists():
+        raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
+    return prompt_path.read_text(encoding="utf-8")
 
 
 def _load_prompt(filename: str) -> str:
@@ -102,8 +340,52 @@ def _find_section_pages_fast(pdf_path: Path, keywords: list, max_pages: int = No
     return pages
 
 
+def _slice_cached_text(pages: list[dict], page_numbers: list, logger=None) -> str:
+    """Extract text from specific pages of cached page text."""
+    text = ""
+    for idx, page_num in enumerate(page_numbers):
+        if page_num <= 0 or page_num > len(pages):
+            continue
+        page = pages[page_num - 1]
+        page_text = page.get("text", "")
+        if page_text:
+            text += f"\n--- Page {page_num} ---\n" + page_text
+        if logger and (idx + 1) % 5 == 0:
+            logger.info(f"  Slicing progress: {idx + 1}/{len(page_numbers)} pages...")
+    if logger:
+        logger.info(f"Slicing complete: {len(text)} chars extracted from {len(page_numbers)} pages")
+    return text
+
+
+def _page_count_cached(pages: list[dict]) -> int:
+    """Return the page count from cached pages."""
+    return len(pages)
+
+
+def _find_section_pages_cached(pages: list[dict], keywords: list, logger=None) -> list:
+    """Search cached page text and return page numbers matching keywords."""
+    matches = []
+    total_pages = len(pages)
+    
+    if logger:
+        logger.info(f"Scanning up to {total_pages} cached pages for: {keywords}")
+    
+    for idx, page in enumerate(pages):
+        page_num = page["page_number"]
+        page_text = page.get("text", "") or ""
+        if page_text and any(kw.lower() in page_text.lower() for kw in keywords):
+            matches.append(page_num)
+        
+        if logger and (idx + 1) % 5 == 0:
+            logger.info(f"  Cache scan progress: {idx + 1}/{total_pages} pages...")
+    
+    if logger:
+        logger.info(f"Found {len(matches)} matching pages in cached text")
+    return matches
+
+
 def _slice_pdf_text(pdf_path: Path, page_numbers: list, logger=None) -> str:
-    """Extract text from specific pages of a PDF."""
+    """Extract text from specific pages of a PDF (legacy, for backward compatibility)."""
     text = ""
     with pdfplumber.open(str(pdf_path)) as pdf:
         for idx, page_num in enumerate(page_numbers):
@@ -121,7 +403,7 @@ def _slice_pdf_text(pdf_path: Path, page_numbers: list, logger=None) -> str:
 
 
 def _pdf_page_count(pdf_path: Path) -> int:
-    """Return the physical page count of a PDF."""
+    """Return the physical page count of a PDF (legacy, for backward compatibility)."""
     with pdfplumber.open(str(pdf_path)) as pdf:
         return len(pdf.pages)
 
@@ -147,15 +429,15 @@ def _cluster_pages(pages: list, gap: int = 3) -> list:
     return clusters
 
 
-def _select_section_pages(pdf_path: Path, keywords: list, logger=None, max_pages: int = 40, radius: int = 1) -> list:
-    """Find relevant pages anywhere in a PDF and select the strongest page clusters."""
-    matches = _find_section_pages_fast(pdf_path, keywords, page_range=None, logger=logger)
-    total_pages = _pdf_page_count(pdf_path)
+def _select_section_pages(pages: list[dict], keywords: list, logger=None, max_pages: int = 40, radius: int = 1) -> list:
+    """Find relevant pages anywhere in cached page text and select the strongest page clusters."""
+    matches = _find_section_pages_cached(pages, keywords, logger=logger)
+    total_pages = _page_count_cached(pages)
     expanded = _expand_pages(matches, total_pages, radius)
 
     if not expanded:
         if logger:
-            logger.info(f"No matching pages found in {pdf_path.name} for: {keywords}")
+            logger.info(f"No matching pages found in cached text for: {keywords}")
         return []
 
     if len(expanded) <= max_pages:
@@ -176,7 +458,7 @@ def _select_section_pages(pdf_path: Path, keywords: list, logger=None, max_pages
     if logger:
         logger.info(
             f"Selected {len(selected)} pages from {len(matches)} keyword matches "
-            f"across {total_pages} physical pages in {pdf_path.name}: {selected}"
+            f"across {total_pages} physical pages in cached text: {selected}"
         )
     return selected
 
@@ -260,21 +542,20 @@ def _call_llm(
     fallback_model: str = None, 
     max_retries: int = 3,
     call_name: str = "llm_call",
-    supporting_data_dir: Path = None
-) -> str:
-    """Send a prompt to the LLM and return the response. Retries with exponential backoff on rate limit, then fallback_model.
-    
-    Writes structured metadata for each call attempt to supporting_data_dir if provided.
-    """
+    supporting_data_dir: Path = None,
+    json_validation_retries: int = 2
+) -> dict:
+    """Send a prompt to the LLM and return parsed JSON response with validation retries."""
     call_started = datetime.now().isoformat()
     call_start = time.time()
     
     metadata = {
         "call_name": call_name,
-        "started_at": call_started,
+        "started_at": datetime.now().isoformat(),
         "primary_model": model,
         "fallback_model": fallback_model,
         "max_retries": max_retries,
+        "json_validation_retries": json_validation_retries,
         "attempts": [],
         "rate_limit_wait_seconds": 0,
         "status": "pending",
@@ -344,6 +625,15 @@ def _call_llm(
             )
         return status_code
 
+    def _validate_and_parse(content: str, schema: dict) -> dict:
+        """Parse and validate content against schema."""
+        parsed = _parse_json_from_response(content)
+        if schema:
+            is_valid, errors = _validate_against_schema(parsed, schema)
+            if not is_valid:
+                raise ValueError(f"JSON validation failed: {'; '.join(errors)}")
+        return parsed
+
     # Rate limit: wait for token bucket
     wait = _token_bucket.take()
     if wait > 0:
@@ -352,17 +642,32 @@ def _call_llm(
             logger.info(f"[{call_name}] Rate limiting: waiting {wait:.1f}s")
         time.sleep(wait)
 
+    schema = _get_schema_for_call(call_name)
+    use_strict_json = schema and _check_response_format_support(model) and _schema_supports_strict_mode(call_name)
+    
+    # Build request kwargs
+    request_kwargs = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": prompt_text},
+            {"role": "user", "content": user_content}
+        ],
+        "timeout": 120.0
+    }
+    if use_strict_json and schema:
+        request_kwargs["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": call_name.replace(".", "_"),
+                "strict": True,
+                "schema": schema
+            }
+        }
+
     primary_error = None
     for attempt in range(max_retries + 1):
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": prompt_text},
-                    {"role": "user", "content": user_content}
-                ],
-                timeout=120.0
-            )
+            response = client.chat.completions.create(**request_kwargs)
             choices = getattr(response, "choices", None)
             if not choices:
                 error_msg = f"No choices returned from LLM (possible rate limit). Response id: {getattr(response, 'id', 'N/A')}"
@@ -370,8 +675,44 @@ def _call_llm(
                     logger.warning(f"[{call_name}] {error_msg}")
                 raise RuntimeError(error_msg)
             
-            content = _log_success(response, model, attempt, is_fallback=False)
-            return content
+            content = response.choices[0].message.content
+            if content is None:
+                raise RuntimeError("LLM returned no text content")
+            content = content.strip()
+            if not content:
+                raise RuntimeError("LLM returned empty text content")
+            
+            # Validate against schema (either strict mode already enforced, or manual validation)
+            if schema and not use_strict_json:
+                parsed = _validate_and_parse(content, schema)
+            else:
+                parsed = _parse_json_from_response(content)
+            
+            # Success - log and return
+            attempt_meta = {
+                "attempt": attempt,
+                "model": model,
+                "started_at": datetime.now().isoformat(),
+                "elapsed_seconds": round(time.time() - call_start, 2),
+                "response_id": getattr(response, "id", None),
+                "response_model": getattr(response, "model", None),
+                "usage": _usage_to_dict(getattr(response, "usage", None)),
+                "status": "success",
+                "is_fallback": False,
+            }
+            metadata["attempts"].append(attempt_meta)
+            metadata["status"] = "success"
+            metadata["model_used"] = model
+            metadata["fallback_used"] = False
+            _write_metadata()
+            
+            if logger:
+                logger.info(
+                    f"[{call_name}] success: model={model} elapsed={round(time.time() - call_start, 2):.1f}s "
+                    f"response_id={attempt_meta['response_id']} "
+                    f"tokens={attempt_meta['usage'].get('total_tokens') if attempt_meta['usage'] else 'N/A'}"
+                )
+            return parsed
             
         except Exception as err1:
             status_code = _log_error(err1, attempt, model, is_fallback=False)
@@ -387,6 +728,36 @@ def _call_llm(
                 time.sleep(wait_time)
                 continue
             
+            # JSON validation failure - retry with re-ask
+            is_json_error = (
+                "JSON validation failed" in error_str 
+                or "LLM returned" in error_str 
+                or "expected JSON object" in error_str
+                or "Expecting value" in error_str
+                or "Extra data" in error_str
+                or "JSONDecodeError" in type(err1).__name__
+            )
+            if is_json_error:
+                if attempt < json_validation_retries:
+                    if logger:
+                        logger.warning(f"[{call_name}] JSON validation failed, retrying (attempt {attempt + 1}/{json_validation_retries})")
+                    print(f"  [LLM] JSON validation failed, retrying...")
+                    
+                    # Add correction message and retry
+                    correction_msg = (
+                        f"Your previous response failed validation: {error_str}. "
+                        f"Please return ONLY valid JSON matching the required schema. "
+                        f"Previous response: {content[:500] if 'content' in locals() else 'N/A'}"
+                    )
+                    request_kwargs["messages"] = [
+                        {"role": "system", "content": prompt_text},
+                        {"role": "user", "content": user_content},
+                        {"role": "assistant", "content": content if 'content' in locals() else ""},
+                        {"role": "user", "content": correction_msg}
+                    ]
+                    time.sleep(1)
+                    continue
+            
             if logger:
                 logger.warning(f"[{call_name}] Primary model ({model}) failed: {err1}")
             print(f"  [LLM] Primary model ({model}) failed: {err1}")
@@ -401,15 +772,15 @@ def _call_llm(
                 logger.info(f"[{call_name}] Falling back to model: {fallback_model}")
             print(f"  [LLM] Falling back to model: {fallback_model}")
             
+            # Try fallback model
+            fallback_request_kwargs = request_kwargs.copy()
+            fallback_request_kwargs["model"] = fallback_model
+            use_strict_json_fallback = _check_response_format_support(fallback_model) and schema
+            if use_strict_json_fallback:
+                fallback_request_kwargs["response_format"] = request_kwargs.get("response_format")
+            
             try:
-                response = client.chat.completions.create(
-                    model=fallback_model,
-                    messages=[
-                        {"role": "system", "content": prompt_text},
-                        {"role": "user", "content": user_content}
-                    ],
-                    timeout=120.0
-                )
+                response = client.chat.completions.create(**fallback_request_kwargs)
                 choices = getattr(response, "choices", None)
                 if not choices:
                     error_msg = f"Fallback model also returned no choices. Response id: {getattr(response, 'id', 'N/A')}"
@@ -417,8 +788,40 @@ def _call_llm(
                         logger.error(f"[{call_name}] {error_msg}")
                     raise RuntimeError(error_msg)
                 
-                content = _log_success(response, fallback_model, attempt, is_fallback=True)
-                return content
+                content = response.choices[0].message.content
+                if content is None:
+                    raise RuntimeError("Fallback LLM returned no text content")
+                content = content.strip()
+                if not content:
+                    raise RuntimeError("Fallback LLM returned empty text content")
+                
+                if schema and not use_strict_json_fallback:
+                    parsed = _validate_and_parse(content, schema)
+                else:
+                    parsed = _parse_json_from_response(content)
+                
+                attempt_meta = {
+                    "attempt": attempt,
+                    "model": fallback_model,
+                    "started_at": datetime.now().isoformat(),
+                    "elapsed_seconds": round(time.time() - call_start, 2),
+                    "response_id": getattr(response, "id", None),
+                    "response_model": getattr(response, "model", None),
+                    "usage": _usage_to_dict(getattr(response, "usage", None)),
+                    "status": "success",
+                    "is_fallback": True,
+                }
+                metadata["attempts"].append(attempt_meta)
+                metadata["status"] = "success"
+                metadata["model_used"] = fallback_model
+                metadata["fallback_used"] = True
+                _write_metadata()
+                
+                if logger:
+                    logger.info(
+                        f"[{call_name}] fallback success: model={fallback_model} elapsed={round(time.time() - call_start, 2):.1f}s"
+                    )
+                return parsed
                 
             except Exception as err2:
                 _log_error(err2, attempt, fallback_model, is_fallback=True)
@@ -430,6 +833,21 @@ def _call_llm(
                 metadata["final_error"] = f"Primary: {primary_error}; Fallback: {err2}"
                 _write_metadata()
                 raise
+    
+    # If we get here, something went wrong
+    metadata["status"] = "failed"
+    metadata["final_error"] = "Unexpected end of function"
+    _write_metadata()
+    raise RuntimeError("Unexpected end of _call_llm")
+
+def _validate_and_parse(content: str, schema: dict) -> dict:
+    """Parse and validate content against schema."""
+    parsed = _parse_json_from_response(content)
+    if schema:
+        is_valid, errors = _validate_against_schema(parsed, schema)
+        if not is_valid:
+            raise ValueError(f"JSON validation failed: {'; '.join(errors)}")
+    return parsed
 
 
 def _normalize_year_key(yr_str: str) -> str:
@@ -509,12 +927,16 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
     
     # Sort by year descending - latest first
     ar_files_sorted = sorted(ar_files, key=lambda p: int(re.search(r"(\d{4})", p.stem).group(1)), reverse=True)
-    latest_ar = ar_files_sorted[0]
-    latest_year = int(re.search(r"(\d{4})", latest_ar.stem).group(1))
+    latest_ar_path = ar_files_sorted[0]
+    latest_year = int(re.search(r"(\d{4})", latest_ar_path.stem).group(1))
+    ticker = workspace_dir.name.split("_")[0]
     
-    print(f" Latest AR: {latest_ar.name} (FY{latest_year})")
+    # Get cached pages for latest AR
+    latest_ar_pages = get_ar_pages(ticker, latest_year, latest_ar_path, logger)
+    
+    print(f" Latest AR: {latest_ar_path.name} (FY{latest_year})")
     if logger:
-        logger.info(f"Latest AR: {latest_ar.name} (FY{latest_year})")
+        logger.info(f"Latest AR: {latest_ar_path.name} (FY{latest_year})")
     
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
@@ -524,7 +946,7 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
     # Initialize compiled result
     compiled = {
         "company": "",
-        "asx_code": workspace_dir.name.split("_")[0],
+        "asx_code": ticker,
         "current_fy": str(latest_year),
         "extracted_at": datetime.now().isoformat(),
         "table_found": False,
@@ -553,8 +975,8 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
         "realised pay", "realized pay", "short-term incentive", "long-term incentive",
         "STI outcomes", "LTI outcomes", "equity awards"
     ]
-    table_pages = _select_section_pages(latest_ar, table_keywords, logger=logger, max_pages=20, radius=1)
-    rem_pages = _select_section_pages(latest_ar, rem_keywords, logger=logger, max_pages=30, radius=1)
+    table_pages = _select_section_pages(latest_ar_pages, table_keywords, logger=logger, max_pages=20, radius=1)
+    rem_pages = _select_section_pages(latest_ar_pages, rem_keywords, logger=logger, max_pages=30, radius=1)
     t1 = time.time()
     if logger:
         logger.info(f"PDF scanning completed in {t1-t0:.1f}s")
@@ -572,7 +994,7 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
         if logger:
             logger.info(f"Found 5-year table on pages: {table_pages}")
         t_slice = time.time()
-        table_slice = _slice_pdf_text(latest_ar, table_pages)
+        table_slice = _slice_cached_text(latest_ar_pages, table_pages)
         t_slice_end = time.time()
         if logger:
             logger.info(f"PDF slicing: {t_slice_end - t_slice:.1f}s, slice size: {len(table_slice)} chars")
@@ -585,18 +1007,16 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
             logger.info(f"User content 1a size: {len(user_content_1a)} chars")
         try:
             t_llm = time.time()
-            raw_1a = _call_llm(
+            result_1a = _call_llm(
                 client, PERFORMANCE_MODEL, prompt_1a, user_content_1a, logger, 
                 PERFORMANCE_FALLBACK_MODEL, call_name="prompt_1a", supporting_data_dir=supporting_data_dir
             )
             t_llm_end = time.time()
             if logger:
-                logger.info(f"LLM call 1a took {t_llm_end - t_llm:.1f}s, response: {len(raw_1a)} chars")
+                logger.info(f"LLM call 1a took {t_llm_end - t_llm:.1f}s")
             if supporting_data_dir:
-                write_supporting_text(supporting_data_dir, "prompt1a_raw_response.txt", raw_1a)
-            result_1a = _parse_json_from_response(raw_1a)
-            if supporting_data_dir:
-                write_supporting_json(supporting_data_dir, "prompt1a_result.json", result_1a)
+                # Raw response is saved in metadata by _call_llm
+                pass
             if result_1a.get("table_found"):
                 compiled["table_found"] = True
                 compiled["extraction_confidence"] = result_1a.get("extraction_confidence", "medium")
@@ -631,7 +1051,7 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
     if result_1a and result_1a.get("table_found") and rem_pages:
         if logger:
             logger.info(f"Found remuneration-performance pages: {rem_pages}")
-        rem_slice = _slice_pdf_text(latest_ar, rem_pages)
+        rem_slice = _slice_cached_text(latest_ar_pages, rem_pages)
         user_content_1b = (
             f"COMPANY: {workspace_dir.name.split('_')[0]}\n"
             f"CURRENT_FY: {latest_year}\n\n"
@@ -639,15 +1059,13 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
             f"PROMPT_1A_OUTPUT:\n{json.dumps(result_1a, indent=2)}"
         )
         try:
-            raw_1b = _call_llm(
+            result_1b = _call_llm(
                 client, PERFORMANCE_MODEL, prompt_1b, user_content_1b, logger, 
                 PERFORMANCE_FALLBACK_MODEL, call_name="prompt_1b", supporting_data_dir=supporting_data_dir
             )
             if supporting_data_dir:
-                write_supporting_text(supporting_data_dir, "prompt1b_raw_response.txt", raw_1b)
-            result_1b = _parse_json_from_response(raw_1b)
-            if supporting_data_dir:
-                write_supporting_json(supporting_data_dir, "prompt1b_result.json", result_1b)
+                # Raw response is saved in metadata by _call_llm
+                pass
             
             if result_1b.get("overrides"):
                 for fy, override in result_1b["overrides"].items():
@@ -714,6 +1132,9 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
                     logger.warning(f"No AR file found for FY{yr}")
                 continue
             
+            # Get cached pages for this AR
+            ar_pages = get_ar_pages(ticker, yr, ar_file, logger)
+            
             if yr_str in compiled["years"] and compiled["years"][yr_str]:
                 missing_metrics = compiled["years"][yr_str].get("missing_metrics", [])
             else:
@@ -732,13 +1153,13 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
                 "performance summary", "earnings per share", "total shareholder return",
                 "NPAT", "revenue", "return on equity", "ROCE", "share price", "dividend"
             ]
-            relevant_pages = _select_section_pages(ar_file, gap_keywords, logger=logger, max_pages=50, radius=1)
+            relevant_pages = _select_section_pages(ar_pages, gap_keywords, logger=logger, max_pages=50, radius=1)
             if not relevant_pages:
                 if logger:
                     logger.warning(f"Prompt 2: FY{yr} - no keyword matches found in annual report")
                 continue
             
-            ar_slice = _slice_pdf_text(ar_file, relevant_pages, logger=logger)
+            ar_slice = _slice_cached_text(ar_pages, relevant_pages, logger=logger)
             t1 = time.time()
             if logger:
                 logger.info(f"Prompt 2: FY{yr} PDF slice extracted in {t1-t0:.1f}s ({len(ar_slice)} chars)")
@@ -751,15 +1172,10 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
             )
             
             try:
-                raw_2 = _call_llm(
+                result_2 = _call_llm(
                     client, PERFORMANCE_MODEL, prompt_2, user_content_2, logger, 
                     PERFORMANCE_FALLBACK_MODEL, call_name=f"prompt_2_fy{yr}", supporting_data_dir=supporting_data_dir
                 )
-                if supporting_data_dir:
-                    write_supporting_text(supporting_data_dir, f"prompt2_fy{yr}_raw_response.txt", raw_2)
-                result_2 = _parse_json_from_response(raw_2)
-                if supporting_data_dir:
-                    write_supporting_json(supporting_data_dir, f"prompt2_fy{yr}_result.json", result_2)
                 
                 if result_2.get("years") and yr_str in result_2["years"]:
                     year_data = result_2["years"][yr_str]
@@ -804,20 +1220,23 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
         if logger:
             logger.info(f"Prompt 3: Starting CEO pay extraction for FY{yr}")
         
+        # Get cached pages for this AR
+        ar_pages = get_ar_pages(ticker, yr, ar_file, logger)
+        
         ceo_keywords = [
             "remuneration report", "remuneration", "key management personnel", 
             "KMP", "executive remuneration", "STI outcomes", "LTI outcomes", 
             "equity awards", "realised pay", "realized pay", "short-term incentive",
             "long-term incentive", "realised remuneration", "realized remuneration"
         ]
-        rem_pages = _select_section_pages(ar_file, ceo_keywords, logger=logger, max_pages=40, radius=1)
+        rem_pages = _select_section_pages(ar_pages, ceo_keywords, logger=logger, max_pages=40, radius=1)
         if not rem_pages:
             if logger:
                 logger.warning(f"No remuneration pages found in {ar_file.name}")
             continue
         
         t0 = time.time()
-        rem_slice = _slice_pdf_text(ar_file, rem_pages, logger=logger)
+        rem_slice = _slice_cached_text(ar_pages, rem_pages, logger=logger)
         t1 = time.time()
         if logger:
             logger.info(f"Prompt 3: FY{yr} remuneration slice extracted in {t1-t0:.1f}s ({len(rem_slice)} chars)")
@@ -829,15 +1248,10 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
         )
         
         try:
-            raw_3 = _call_llm(
+            result_3 = _call_llm(
                 client, PERFORMANCE_MODEL, prompt_3, user_content_3, logger, 
                 PERFORMANCE_FALLBACK_MODEL, call_name=f"prompt_3_fy{yr}", supporting_data_dir=supporting_data_dir
             )
-            if supporting_data_dir:
-                write_supporting_text(supporting_data_dir, f"prompt3_fy{yr}_raw_response.txt", raw_3)
-            result_3 = _parse_json_from_response(raw_3)
-            if supporting_data_dir:
-                write_supporting_json(supporting_data_dir, f"prompt3_fy{yr}_result.json", result_3)
             
             if result_3.get("ceo_realised_rem") is not None:
                 ceo_rem = result_3["ceo_realised_rem"]
@@ -886,15 +1300,10 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
     )
     
     try:
-        raw_4 = _call_llm(
+        result_4 = _call_llm(
             client, PERFORMANCE_MODEL, prompt_4, user_content_4, logger, 
             PERFORMANCE_FALLBACK_MODEL, call_name="prompt_4", supporting_data_dir=supporting_data_dir
         )
-        if supporting_data_dir:
-            write_supporting_text(supporting_data_dir, "prompt4_raw_response.txt", raw_4)
-        result_4 = _parse_json_from_response(raw_4)
-        if supporting_data_dir:
-            write_supporting_json(supporting_data_dir, "prompt4_result.json", result_4)
         if logger:
             logger.info("Prompt 4: Validation complete")
     except Exception as e:

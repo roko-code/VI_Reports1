@@ -67,5 +67,6 @@ OUTPUT — JSON:
 
 IMPORTANT: All monetary values in the JSON (cash_non_cash_salary, sti_value, lti_value, ceo_realised_rem) 
 MUST be in **$millions (AUD)**, rounded to 2 decimal places. 
+Note that some values will be in foreign currencies. These must be converted to AUD
 Do NOT output thousands, raw dollars, or any other unit. 
 Example: if CEO realised remuneration is $3,600,000, output 3.60.

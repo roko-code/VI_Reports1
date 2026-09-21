@@ -26,6 +26,7 @@ DEFAULT_STATE_SCHEMA = {
         "legacy_codes": []
     },
     "pipeline_status": {
+        "nom_discovered": False,
         "nom_extracted": False,
         "annual_reports_downloaded": False,
         "performance_table_built": False,
@@ -51,6 +52,11 @@ DEFAULT_STATE_SCHEMA = {
 }
 
 # Stage module imports (graceful degradation if a module is missing)
+try:
+    from find_nom import run_stage0_discovery as stage_nom_discovery
+except Exception:
+    stage_nom_discovery = None
+
 try:
     from extract_nom import run_batch_pipeline as stage_nom_extraction
 except Exception:
@@ -147,6 +153,21 @@ class CompanyPipeline:
             status = state.setdefault("pipeline_status", {})
             migrated = False
 
+            # Add any missing pipeline_status keys from schema
+            for key, default_value in DEFAULT_STATE_SCHEMA["pipeline_status"].items():
+                if key not in status:
+                    status[key] = default_value
+                    migrated = True
+                    self.logger.warning(f"Added missing state flag {key}={default_value}")
+
+            if "nom_discovered" not in status:
+                # Existing workspaces predate this flag; infer it from the notices directory.
+                status["nom_discovered"] = any(self.notices_dir.glob("*.pdf"))
+                migrated = True
+                self.logger.warning(
+                    f"Added missing state flag nom_discovered={status['nom_discovered']}"
+                )
+
             if "annual_reports_downloaded" not in status:
                 # Existing workspaces predate this flag; infer it from the workspace.
                 status["annual_reports_downloaded"] = any(self.annual_reports_dir.glob("*.pdf"))
@@ -210,6 +231,22 @@ class CompanyPipeline:
         print(f" Starting Pipeline for [{self.company_id}]")
         print(f"==========================================")
 
+        # Stage 0: NoM Discovery & Download
+        if not self.state["pipeline_status"]["nom_discovered"] or force_reprocess:
+            if stage_nom_discovery:
+                stage_dir = self.supporting_data_dir / "stage0_nom_discovery"
+                self.logger.stage_start("Stage 0: NoM Discovery & Download")
+                success = stage_nom_discovery(self.ticker, int(self.year), self.workspace_dir, self.logger)
+                self.logger.stage_end("Stage 0: NoM Discovery & Download", success)
+                if success:
+                    self.update_status("nom_discovered", True)
+                else:
+                    print("[Stage 0] NoM discovery/download failed or incomplete. State not updated.")
+            else:
+                print("[Stage 0] find_nom module not available. Skipping.")
+        else:
+            print("[Stage 0] NoM Discovery already COMPLETE. Skipping.")
+
         # Stage 1: NoM Metadata & Resolution Extraction
         if not self.state["pipeline_status"]["nom_extracted"] or force_reprocess:
             if stage_nom_extraction:
@@ -227,11 +264,15 @@ class CompanyPipeline:
             print("[Stage 1] NoM Extraction already COMPLETE. Skipping.")
 
         # Stage 2: Annual Reports Download
+        print(f"[DEBUG] Stage 2 check: annual_reports_downloaded={self.state['pipeline_status']['annual_reports_downloaded']}, force_reprocess={force_reprocess}")
         if not self.state["pipeline_status"]["annual_reports_downloaded"] or force_reprocess:
+            print("[DEBUG] Entering Stage 2 block")
             if stage_ar_download:
+                print("[DEBUG] stage_ar_download available, starting")
                 stage_dir = self.supporting_data_dir / "stage2_ar_download"
                 self.logger.stage_start("Stage 2: Annual Reports Download")
                 success, all_codes = stage_ar_download(self.ticker, int(self.year), supporting_data_dir=stage_dir, logger=self.logger)
+                print(f"[DEBUG] Stage 2 returned: success={success}, codes={all_codes}")
                 if all_codes and len(all_codes) > 1:
                     self.state["metadata"]["legacy_codes"] = all_codes[1:]
                     self.logger.info(f"Legacy codes discovered: {all_codes[1:]}")
