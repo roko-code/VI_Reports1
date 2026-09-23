@@ -27,3 +27,7 @@ OUTPUT — JSON using the EXACT same per-year field names and structure as Promp
 (so the results can be merged programmatically), plus markdown footnotes explicitly 
 noting these values were sourced from the individual FY{year} AR rather than a 
 5-year summary table.
+
+IMPORTANT — UNIT CONSISTENCY: ALL financial values in the JSON MUST be in 
+$millions, rounded to 2 decimal places. If the source shows raw dollars or 
+thousands, convert before outputting. Example: $10,000,000,000 = 10000.00.

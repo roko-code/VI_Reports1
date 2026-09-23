@@ -60,9 +60,16 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
     issues = []
     
     # Check 1: NoM JSON
-    nom_path = workspace_dir / "extracted_json" / "notices" / "RIO_2026_NOM.json"
+    nom_dir = workspace_dir / "extracted_json" / "notices"
     nom_archived = workspace_dir / "extracted_json" / "notices_archived"
-    active_nom = nom_path.exists()
+    
+    # Find NoM JSON in either directory
+    nom_json_files = []
+    for search_dir in [nom_dir, nom_archived]:
+        if search_dir.exists():
+            nom_json_files.extend(search_dir.glob("*.json"))
+    
+    active_nom = any(nom_dir.glob("*.json")) if nom_dir.exists() else False
     archived_nom = any(nom_archived.glob("*.json")) if nom_archived.exists() else False
     
     if not active_nom and not archived_nom:
@@ -74,18 +81,28 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
     else:
         issues.append({"check": "NoM JSON location", "status": "WARN", "detail": "NoM JSON exists in both locations - possible duplicate processing"})
     
-    try:
-        with open(nom_path if active_nom else list(nom_archived.glob("*.json"))[0]) as f:
-            nom_data = json.load(f)
-        
-        if "Voting_Resolutions" not in nom_data and "voting_resolutions" not in nom_data:
-            issues.append({"check": "NoM JSON", "status": "FAIL", "detail": "No voting resolutions found in NoM JSON"})
-        
-        agm = nom_data.get("AGM_Details", {})
-        if agm and not agm.get("meeting_date"):
-            issues.append({"check": "NoM JSON", "status": "WARN", "detail": "Meeting date missing from NoM JSON"})
-    except Exception as e:
-        issues.append({"check": "NoM JSON", "status": "FAIL", "detail": f"Cannot parse NoM JSON: {e}"})
+    if nom_json_files:
+        try:
+            with open(nom_json_files[0]) as f:
+                nom_data = json.load(f)
+            
+            if "Voting_Resolutions" not in nom_data and "voting_resolutions" not in nom_data:
+                issues.append({"check": "NoM JSON", "status": "FAIL", "detail": "No voting resolutions found in NoM JSON"})
+            
+            agm = nom_data.get("AGM_Details", {})
+            if agm:
+                meeting_date = agm.get("agm_date") or agm.get("meeting_date")
+                if not meeting_date:
+                    issues.append({"check": "NoM JSON", "status": "WARN", "detail": "Meeting date missing from NoM JSON AGM_Details"})
+                else:
+                    # Meeting date is present - check it's in expected format
+                    has_weekday = any(day in meeting_date.lower() for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"])
+                    if not has_weekday:
+                        issues.append({"check": "NoM JSON", "status": "WARN", "detail": f"Meeting date '{meeting_date}' may not include weekday"})
+            else:
+                issues.append({"check": "NoM JSON", "status": "WARN", "detail": "AGM_Details section not found in NoM JSON"})
+        except Exception as e:
+            issues.append({"check": "NoM JSON", "status": "FAIL", "detail": f"Cannot parse NoM JSON: {e}"})
     
     # Check 2: Performance History
     perf_path = workspace_dir / "extracted_json" / "performance_history_5yr.json"
@@ -115,6 +132,33 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
                     elif val > 100:
                         issues.append({"check": "CEO pay range", "status": "WARN",
                                       "detail": f"FY{fy} CEO pay ${val:.1f}m above expected range"})
+            
+            # Check financial metric unit consistency across years
+            financial_metrics = ["npat", "underlying_npat", "revenue", "net_assets"]
+            for metric in financial_metrics:
+                values = []
+                for fy, data in sorted(years.items()):
+                    val = data.get(metric)
+                    if isinstance(val, (int, float)) and val is not None:
+                        values.append((fy, val))
+                
+                if len(values) >= 2:
+                    # Check for unit inconsistencies: values spanning >3 orders of magnitude
+                    vals_only = [v[1] for v in values]
+                    max_val = max(vals_only)
+                    min_val = min(vals_only) if min(vals_only) > 0 else 1
+                    if max_val / min_val > 1000:
+                        issues.append({
+                            "check": "Metric unit consistency",
+                            "status": "CRITICAL",
+                            "detail": f"{metric} values span >1000x across years ({min_val:.1f} to {max_val:.1f}) - likely unit mismatch. Values: {dict(values)}"
+                        })
+                    elif max_val / min_val > 100:
+                        issues.append({
+                            "check": "Metric unit consistency", 
+                            "status": "WARN",
+                            "detail": f"{metric} values vary widely across years (range: {min_val:.1f} to {max_val:.1f}) - possible unit issue. Values: {dict(values)}"
+                        })
             
             # Check years have data
             years_with_data = 0

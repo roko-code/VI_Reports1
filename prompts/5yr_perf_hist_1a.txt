@@ -62,6 +62,13 @@ downstream — this is not your task.
 
 OUTPUT — BOTH:
 
+IMPORTANT — UNIT CONSISTENCY:
+ALL financial values (npat, underlying_npat, revenue, net_assets) in the JSON MUST be in $millions, rounded to 2 decimal places.
+DO NOT output raw dollars, thousands, or any other unit.
+Example: if the source shows "$10,000,000,000" or "$10B" or "$10,000M", output 10000.00.
+If the source shows "$21,100" and other years show $11,552m, check whether $21,100 is already in millions and output 21.10.
+If you are unsure of the unit, cite the source page and note the unit in underlying_npat_basis_note.
+
 1. JSON:
 {
   "company": "...", "asx_code": "...",
