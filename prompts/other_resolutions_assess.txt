@@ -84,19 +84,49 @@ If a resolution cannot be properly assessed with the documents you were given, s
 
 OUTPUT FORMAT
 
-Produce your output as Markdown, structured as follows:
+Produce your output as JSON, structured as follows:
 
-1. A short header: company name, financial year, and the list of documents supplied.
-2. A table of every resolution in the NoM (in order), with columns: Resolution number | Title as stated | Category (director election / remuneration / in scope / no-vote business).
-3. For every in-scope resolution, one Markdown table with columns: Resolution number | Rule(s) applied | AI Result | Confidence | Evidence, comparison and action. Group rows by resolution, not by rule, so each resolution's full assessment reads together.
-4. A separate "Governance context notes" table for rules whose Treatment is context/engagement only and aren't tied to any specific resolution this year (e.g. GOV-01, 03, 06, 08, 09, 10 where there's no auditor resolution, 12 where there's no Say on Climate resolution, 13, NED-02, NED-03, KMP-01, and the four Focus-overlay items — label these Focus-01 Long-term pay alignment, Focus-02 Individual director skills, Focus-03 Shareholder engagement/hybrid AGM, Focus-04 AI and cybersecurity oversight). These never carry a vote recommendation on their own; they're narrative context for the human monitor's report, drawn from the Annual Report. Use the same columns as above but omit the Resolution number column.
-5. A Section 13-style AI completeness self-check, as a Markdown checklist:
-   [ ] Every resolution in the NoM has been listed and categorised (out of scope, no-vote business, or assessed).
-   [ ] Every in-scope resolution has a result, a confidence level, and at least one rule citation.
-   [ ] Every result cites a printed page number, or explicitly states no supporting evidence was found.
-   [ ] Every evidence/action field keeps disclosed fact separate from ASA judgement.
-   [ ] Every Uncertain result names the specific missing document.
-   [ ] Any resolution type not covered by the mapping table is flagged as such, with the analogous rule(s) used stated explicitly.
-   [ ] No director-election or remuneration-related resolution has been assessed here.
+{
+  "header": {
+    "company": "string",
+    "financial_year": "string",
+    "documents_supplied": ["string"],
+    "documents_missing": ["string"]
+  },
+  "resolution_categorisation": [
+    {
+      "resolution_number": "string",
+      "title": "string",
+      "category": "director_election|remuneration|in_scope|no_vote_business"
+    }
+  ],
+  "in_scope_resolutions": [
+    {
+      "resolution_number": "string",
+      "rules_applied": ["string"],
+      "ai_result": "P|Pt|F|U|N/A",
+      "confidence": "High|Medium|Low",
+      "evidence_comparison_action": "string",
+      "missing_document_note": "string or null"
+    }
+  ],
+  "governance_context_notes": [
+    {
+      "rule": "string",
+      "ai_result": "P|Pt|F|U|N/A",
+      "confidence": "High|Medium|Low",
+      "evidence_comparison_action": "string"
+    }
+  ],
+  "section_13_self_check": [
+    {
+      "item": "string",
+      "completed": true,
+      "note": "string"
+    }
+  ]
+}
 
-Use the result key P = Pass, Pt = Partial, F = Fail, U = Uncertain, N/A = Not Applicable. Do not include a "Monitor result" column or a final For/Against/Undecided recommendation — that is produced by a separate consolidation step from this output together with the remuneration and director-election assessments.
+Return ONLY valid JSON. Do not include any Markdown, explanations, or additional text. Ensure the JSON is valid and matches the structure above exactly.
+
+IMPORTANT: All evidence/citations MUST reference printed page numbers (the page number shown in the document's own header/footer), not raw PDF page indices. Format as [p.N] or [p.N-M].

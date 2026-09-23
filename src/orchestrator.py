@@ -93,6 +93,11 @@ except Exception:
     stage_other_resolutions = None
 
 try:
+    from stage7_audit import run_pipeline as stage_audit
+except Exception:
+    stage_audit = None
+
+try:
     from text_summaries import run_pipeline as stage_text_summaries
 except Exception:
     stage_text_summaries = None
@@ -374,7 +379,7 @@ class CompanyPipeline:
         else:
             print("[Stage 6] Director Election Assessment already COMPLETE. Skipping.")
 
-        # Stage 7: Other Resolutions Assessment
+# Stage 7: Other Resolutions Assessment
         if not self.state["pipeline_status"]["other_resolutions_assessed"] or force_reprocess:
             if stage_other_resolutions:
                 stage_dir = self.supporting_data_dir / "stage7_other_resolutions"
@@ -389,13 +394,20 @@ class CompanyPipeline:
                 print("[Stage 7] other_resolutions_assess module not available. Skipping.")
         else:
             print("[Stage 7] Other Resolutions Assessment already COMPLETE. Skipping.")
-
-        # Stage 7 Audit: Post-resolution assessment data quality check
+        
+# Stage 7 Audit: Post-resolution assessment data quality check
         if not self.state["pipeline_status"]["audit_passed"] or force_reprocess:
-            self.logger.stage_start("Stage 7 Audit: Data Quality Audit")
-            self.logger.stage_end("Stage 7 Audit: Data Quality Audit", False, "Not yet implemented")
-            print("[Stage 7 Audit] Running data quality audit...")
-            print("[Stage 7 Audit] Not yet implemented. Skipping.")
+            if stage_audit:
+                stage_dir = self.supporting_data_dir / "stage7_audit"
+                self.logger.stage_start("Stage 7 Audit: Data Quality Audit")
+                success = stage_audit(self.workspace_dir, stage_dir, self.logger)
+                self.logger.stage_end("Stage 7 Audit: Data Quality Audit", success)
+                if success:
+                    self.update_status("audit_passed", True)
+                else:
+                    print("[Stage 7 Audit] Audit failed or identified critical issues. State not updated.")
+            else:
+                print("[Stage 7 Audit] Audit module not available. Skipping.")
         else:
             print("[Stage 7 Audit] Data quality audit already COMPLETE. Skipping.")
 
