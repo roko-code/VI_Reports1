@@ -211,13 +211,15 @@ class CompanyPipeline:
         return new_state
 
     def save_state(self, new_state_data: dict = None):
-        """Persists current in-memory state back to state.json."""
+        """Persists current in-memory state back to state.json atomically."""
         if new_state_data:
             self.state = new_state_data
             
         self.state["metadata"]["last_updated"] = datetime.now().isoformat()
-        with open(self.state_file, "w", encoding="utf-8") as f:
+        tmp_path = self.workspace_dir / "state.json.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(self.state, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, self.state_file)
 
     def update_status(self, step_key: str, is_complete: bool):
         """Helper to mark individual pipeline stages complete/incomplete."""
@@ -264,15 +266,11 @@ class CompanyPipeline:
             print("[Stage 1] NoM Extraction already COMPLETE. Skipping.")
 
         # Stage 2: Annual Reports Download
-        print(f"[DEBUG] Stage 2 check: annual_reports_downloaded={self.state['pipeline_status']['annual_reports_downloaded']}, force_reprocess={force_reprocess}")
         if not self.state["pipeline_status"]["annual_reports_downloaded"] or force_reprocess:
-            print("[DEBUG] Entering Stage 2 block")
             if stage_ar_download:
-                print("[DEBUG] stage_ar_download available, starting")
                 stage_dir = self.supporting_data_dir / "stage2_ar_download"
                 self.logger.stage_start("Stage 2: Annual Reports Download")
                 success, all_codes = stage_ar_download(self.ticker, int(self.year), supporting_data_dir=stage_dir, logger=self.logger)
-                print(f"[DEBUG] Stage 2 returned: success={success}, codes={all_codes}")
                 if all_codes and len(all_codes) > 1:
                     self.state["metadata"]["legacy_codes"] = all_codes[1:]
                     self.logger.info(f"Legacy codes discovered: {all_codes[1:]}")
