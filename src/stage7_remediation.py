@@ -13,19 +13,15 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
-import pdfplumber
 from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
-
-from logging_utils import write_supporting_json, write_supporting_text
-from ar_text_cache import get_ar_pages
+from llm_config import remediation_models
 
 load_dotenv(find_dotenv())
 
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-REMEDIATION_PRIMARY_MODEL = os.getenv("REMEDIATION_PRIMARY_MODEL", "openai/gpt-4.1-mini")
-REMEDIATION_FALLBACK_MODEL = os.getenv("REMEDIATION_FALLBACK_MODEL", "google/gemini-3.1-flash-lite")
+REMEDIATION_PRIMARY_MODEL, REMEDIATION_FALLBACK_MODEL = remediation_models()
 AUDIT_PASS_THRESHOLD = int(os.getenv("AUDIT_PASS_THRESHOLD", "75"))
 
 BASE_DIR = Path(__file__).resolve().parent.parent

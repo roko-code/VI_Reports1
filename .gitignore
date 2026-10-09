@@ -13,4 +13,11 @@ __pycache__/
 .ipynb_checkpoints/
 *.log
 data/
-tests/
+
+# Scratch experiment folders under tests/. The regression suite itself and its
+# fixtures ARE tracked: AGENTS.md and docs/validator_traps.md each cite a test
+# as the evidence that a validator trap is fixed, and a test that is ignored
+# does not exist for the next person.
+tests/TestAPIKey
+tests/TestRun1
+tests/__pycache__/

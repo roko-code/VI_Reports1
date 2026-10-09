@@ -24,6 +24,17 @@ Mandatory (always supplied):
 
 Optional (supplied only when the orchestrator has sourced them for a specific resolution):
 3. Any resolution-specific document referenced by the NoM but not contained within it or the Annual Report — for example, a Share Purchase Plan offer booklet, a capital-raising prospectus or ASX announcement, the specific proposed constitutional amendment wording (if not reproduced in full in the NoM), or a standalone sustainability/ESG or TCFD report.
+4. A pre-fetched block of news search results covering roughly the past 12 months. Supplementary context only — see "Using the news search results" below.
+
+
+USING THE NEWS SEARCH RESULTS (DOCUMENT 4)
+
+Each entry in the news block includes a headline, a short snippet, a source, a publication date and a URL. Before using any entry:
+- Confirm it is clearly about this company (matching the full legal name and/or ASX ticker), not a similarly-named company or an unrelated entity. Discard anything ambiguous rather than guessing.
+- Treat each snippet as an unverified lead, not a confirmed fact. If a news item is relevant to a resolution, frame it as "media reporting described X; the Annual Report does not address this" rather than asserting the event happened.
+- Use it only where it bears on a specific in-scope resolution — for example media coverage of a capital raising or buyback under consideration, governance or conduct controversies, litigation, regulator action, or shareholding changes reported outside the Annual Report. Do not bring in general company news that has no bearing on a resolution being assessed.
+- Cite any item you rely on as [Source, "headline", DD Mon YYYY, URL], distinct from the [p.N] page-citation format used for the other documents.
+- If the block is empty, contains nothing relevant, or was not supplied, note that in your document inventory and move on — do not speculate or invent a plausible-sounding news item.
 
 At the start of your output, list which of these you were given. The Annual Report and NoM are sufficient to assess most governance and disclosure-type resolutions (auditor, political donations, Say on Climate, annual report quality, dividends). Capital-management resolutions (placements, entitlement offers, SPPs, buybacks) and constitutional amendments usually require the specific offer document or amendment wording — if you were not given one and the NoM/Annual Report don't contain enough detail to assess the resolution properly, do NOT guess from the resolution's short title alone. Mark the result Uncertain and state precisely which document you need (e.g. "SPP offer booklet — cannot confirm the 12-month $30,000 individual cap or the pricing formula from the NoM alone"). This is the signal the orchestrator uses to fetch that document and re-run this assessment; there is no automated fetch yet, so word it so a human monitor could act on it directly.
 

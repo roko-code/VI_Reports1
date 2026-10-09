@@ -23,10 +23,21 @@ Underlying NPAT definition as used in the 5-year extraction.
 Do not re-extract metrics already found in Prompt 1 — this call is gap-filling 
 only.
 
-OUTPUT — JSON using the EXACT same per-year field names and structure as Prompt 1a 
-(so the results can be merged programmatically), plus markdown footnotes explicitly 
-noting these values were sourced from the individual FY{year} AR rather than a 
-5-year summary table.
+OUTPUT — JSON using the EXACT same structure as Prompt 1a, wrapped in a "years" key, 
+so the results can be merged programmatically:
+
+{
+  "years": {
+    "{year}": {
+      "npat": ...,
+      "npat_source_page": ...,
+      etc.  // all same fields as Prompt 1a per-year object
+    }
+  }
+}
+
+Plus markdown footnotes explicitly noting these values were sourced from the 
+individual FY{year} AR rather than a 5-year summary table.
 
 IMPORTANT — UNIT CONSISTENCY: ALL financial values in the JSON MUST be in 
 $millions, rounded to 2 decimal places. If the source shows raw dollars or 

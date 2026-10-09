@@ -4,7 +4,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from logging_utils import TechnicalLogger, write_supporting_json, write_supporting_text
+from logging_utils import TechnicalLogger
 
 # Base Paths
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -34,6 +34,7 @@ DEFAULT_STATE_SCHEMA = {
         "remuneration_assessed": False,
         "director_assessments_complete": False,
         "other_resolutions_assessed": False,
+        "news_prefetched": False,
         "text_summaries_generated": False,
         "audit_passed": False,
         "board_questions_generated": False,
@@ -96,6 +97,11 @@ try:
     from stage7_audit import run_pipeline as stage_audit
 except Exception:
     stage_audit = None
+
+try:
+    from news_prefetch import run_pipeline as stage_news_prefetch
+except Exception:
+    stage_news_prefetch = None
 
 try:
     from text_summaries import run_pipeline as stage_text_summaries
@@ -346,6 +352,26 @@ class CompanyPipeline:
                 print("[Stage 4] performance_table module not available. Skipping.")
         else:
             print("[Stage 4] Performance Table already COMPLETE. Skipping.")
+
+        # Stage 7.5: News Prefetch (runs before the assessment stages so the
+        # Tavily results are on disk and available to any resolution
+        # assessment that wants them; still feeds Stages 8/9/10 as before).
+        # Number kept as 7.5: the digits are labels only - state flags are
+        # named, and no consumer reads the stageN_* directory name.
+        if not self.state["pipeline_status"]["news_prefetched"] or force_reprocess:
+            if stage_news_prefetch:
+                stage_dir = self.supporting_data_dir / "stage7_5_news_prefetch"
+                self.logger.stage_start("Stage 7.5: News Prefetch")
+                success = stage_news_prefetch(self.workspace_dir, stage_dir, self.logger)
+                self.logger.stage_end("Stage 7.5: News Prefetch", success)
+                if success:
+                    self.update_status("news_prefetched", True)
+                else:
+                    print("[Stage 7.5] News prefetch failed or incomplete. State not updated.")
+            else:
+                print("[Stage 7.5] news_prefetch module not available. Skipping.")
+        else:
+            print("[Stage 7.5] News Prefetch already COMPLETE. Skipping.")
 
         # Stage 5: Remuneration Report Assessment
         if not self.state["pipeline_status"]["remuneration_assessed"] or force_reprocess:

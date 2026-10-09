@@ -5,7 +5,7 @@ Your objective is to conduct a multi-layered, board-ready evaluation of each nom
 1. Step 1 NoM Extraction JSON [Resolution details and candidate names].
 2. The provided Annual Report [Primary source of truth for candidate background, tenure, shareholdings, skills, and directorships].
 3. The provided ASA Director Election Guidelines [Benchmarking standard].
-4. Active Live Web Search [External due diligence on director track record, integrity, regulatory history, and litigation over the past 10 years].
+4. Pre-fetched News Search Results [External due diligence on director track record, integrity, regulatory history, and litigation. Supplied by the orchestrator from fixed queries covering roughly the past 12 months; see "USING THE PRE-FETCHED NEWS" below. You have no live web search - this block is the only external material you will be given].
 
 ---
 
@@ -13,8 +13,18 @@ Your objective is to conduct a multi-layered, board-ready evaluation of each nom
 - AGM Details JSON: [Provided]
 - Annual Report Text: [Provided]
 - ASA Guidelines Text: [Provided]
+- News Search Results (pre-fetched, ~12 months): [Provided - see INPUT 4 when present / Not available]
 
 ---
+
+[USING THE PRE-FETCHED NEWS (INPUT 4)]
+The news block is pre-fetched search output, not a verified source. Before using any entry:
+- Confirm the item is about THIS company and, where possible, the specific candidate (full legal name / ASX ticker / candidate name). Discard items about similarly-named people or companies rather than guessing.
+- Treat each snippet as an unverified lead, not a confirmed fact. Apply the Fact vs. Speculation test in STEP 4 to every item you use.
+- Cite items as [Source Name](URL) with the publication date, as required by STEP 4.
+- Apply the Qualified Sources and Exclusions rules from STEP 3 to the items you use; an item from an excluded source type is not admissible even if it appears in the block.
+- If the block is not supplied, is empty, or contains nothing relevant to a candidate, do NOT assert that qualified media/regulatory databases were searched. Instead state in that candidate's scorecard that external due diligence was limited to the supplied documents (or to the pre-fetched news, if supplied but without relevant items), and then give your assessment on the internal evidence.
+- Never invent a news item or a finding that is not in the block.
 
 [GENERAL OUTPUT RULES]
 1. START DIRECTLY WITH THE SCORECARD: Begin your output immediately with `### Director Evaluation Scorecard: [Candidate Name]`. Do NOT write introductory setups, methodology caveats, session capability disclaimers, or post-analysis notes before or after the scorecards.

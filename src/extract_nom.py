@@ -7,6 +7,7 @@ import pypdf
 from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
 from logging_utils import write_supporting_text
+from llm_config import extract_nom_models
 
 # Load environment variables
 load_dotenv(find_dotenv())
@@ -15,9 +16,8 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not API_KEY:
     raise ValueError("OPENROUTER_API_KEY not found in .env file.")
 
-# Model configuration (stage-specific env vars with fallback)
-EXTRACT_NOM_MODEL = os.getenv("EXTRACT_NOM_MODEL", "stealth/ox-alpha")
-EXTRACT_NOM_FALLBACK_MODEL = os.getenv("EXTRACT_NOM_FALLBACK_MODEL", "google/gemini-2.0-flash-exp:free")
+# Model configuration (supports global override via LLM_PRIMARY_OVERRIDE / LLM_FALLBACK_OVERRIDE)
+EXTRACT_NOM_MODEL, EXTRACT_NOM_FALLBACK_MODEL = extract_nom_models()
 
 # Set up project base directory and paths
 BASE_DIR = Path(__file__).resolve().parent.parent

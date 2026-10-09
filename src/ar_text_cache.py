@@ -5,24 +5,23 @@ Persistent, cross-run cache for annual report extracted text.
 Stores page-by-page text with metadata for invalidation and diagnostics.
 """
 
-import os
 import json
 import hashlib
-import time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
 import pdfplumber
 
-from logging_utils import write_supporting_json
+from ar_retrieval import is_unusable_text
 
 # Cache configuration
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "_cache" / "annual_report_text"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Extractor version - increment when PDF extraction logic changes to force cache regeneration
-EXTRACTOR_VERSION = "1.0.0"
+# 1.1.0 adds unusable-page detection (see _extract_ar_pages).
+EXTRACTOR_VERSION = "1.1.0"
 
 
 def _get_cache_path(ticker: str, fy: int) -> Path:
@@ -46,38 +45,64 @@ def _get_file_stat(pdf_path: Path) -> tuple[int, float]:
 
 
 def _is_cache_valid(cached_meta: dict, pdf_path: Path) -> bool:
-    """Check if cache is still valid by comparing file size and mtime."""
+    """Check whether a cache entry still describes the PDF on disk.
+
+    Validity is decided by SHA-256 whenever the entry recorded one, so that an
+    identical PDF copied into a new workspace (with a different mtime) is still
+    a cache hit. Size and mtime remain the fallback for entries written before
+    hashes were recorded. The extractor version is always enforced, because
+    changing extraction logic must invalidate existing entries.
+    """
     if not pdf_path.exists():
         return False
-    
+
+    if cached_meta.get("extractor_version") != EXTRACTOR_VERSION:
+        return False
+
+    current_size, current_mtime = _get_file_stat(pdf_path)
+
+    cached_hash = cached_meta.get("file_hash")
+    if cached_hash:
+        return _compute_file_hash(pdf_path) == cached_hash
+
     cached_size = cached_meta.get("file_size")
     cached_mtime = cached_meta.get("file_mtime")
-    
     if cached_size is None or cached_mtime is None:
         return False
-    
-    current_size, current_mtime = _get_file_stat(pdf_path)
-    
+
     return cached_size == current_size and abs(cached_mtime - current_mtime) < 1.0
 
 
-def _extract_ar_pages(pdf_path: Path) -> tuple[list[dict], list[int]]:
+def _extract_ar_pages(pdf_path: Path) -> tuple[list[dict], list[int], list[int]]:
     """
     Extract all page text from a PDF.
-    Returns (pages_list, page_char_counts).
-    pages_list: list of {"page_number": int, "text": str}
-    page_char_counts: list of character counts per page (for OCR detection)
+
+    Pages whose text is undecodable glyph noise are marked ``usable: False``
+    with their text removed. A PDF that embeds a font without a usable
+    character map yields raw ``(cid:N)`` tokens instead of letters; this is not
+    repairable at read time (pypdf, pdfminer and MuPDF all resolve it the same
+    way). Left in place, such text consumes the retrieval budget, can match
+    keywords by accident, and would be presented to the model as evidence.
+
+    Returns (pages_list, page_char_counts, unusable_page_numbers).
     """
     pages = []
     char_counts = []
-    
+    unusable: list[int] = []
+
     with pdfplumber.open(str(pdf_path)) as pdf:
         for idx, page in enumerate(pdf.pages, start=1):
             page_text = page.extract_text() or ""
-            pages.append({"page_number": idx, "text": page_text})
+            usable = not is_unusable_text(page_text)
+            if not usable:
+                unusable.append(idx)
+                page_text = ""
+            pages.append(
+                {"page_number": idx, "text": page_text, "usable": usable}
+            )
             char_counts.append(len(page_text))
-    
-    return pages, char_counts
+
+    return pages, char_counts, unusable
 
 
 def _load_cached_ar_pages(ticker: str, fy: int) -> Optional[dict]:
@@ -126,31 +151,35 @@ def get_ar_pages(ticker: str, fy: int, pdf_path: Path, logger=None) -> list[dict
     if logger:
         logger.info(f"Cache MISS: {ticker}_{fy} - extracting from PDF")
     
-    pages, char_counts = _extract_ar_pages(Path(pdf_path))
-    
+    pages, char_counts, unusable = _extract_ar_pages(Path(pdf_path))
+
     # Build cache entry with full metadata
     file_size, file_mtime = _get_file_stat(Path(pdf_path))
     file_hash = _compute_file_hash(Path(pdf_path))
-    
+
     cache_data = {
         "ticker": ticker,
         "fy": fy,
         "extractor_version": EXTRACTOR_VERSION,
         "extraction_timestamp": datetime.now().isoformat(),
-        "file_size": _get_file_stat(Path(pdf_path))[0],
+        "file_size": file_size,
         "file_mtime": file_mtime,
         "file_hash": file_hash,
         "page_count": len(pages),
+        "unreadable_pages": unusable,
         "page_char_counts": char_counts,
         "total_chars": sum(char_counts),
         "pages": pages,
     }
-    
+
     _save_cached_ar_pages(ticker, fy, cache_data)
-    
+
     if logger:
-        logger.info(f"Cached: {ticker}_{fy} ({len(pages)} pages, {sum(char_counts)} chars)")
-    
+        logger.info(
+            f"Cached: {ticker}_{fy} ({len(pages)} pages, {sum(char_counts)} chars)"
+            + (f", {len(unusable)} unreadable pages" if unusable else "")
+        )
+
     return pages
 
 

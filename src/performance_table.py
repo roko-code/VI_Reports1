@@ -9,7 +9,11 @@ from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
 
 from logging_utils import write_supporting_json, write_supporting_text
+from currency_anchor import (contains_aud_million, near_miss_currencies,
+                            reporting_currency_for)
+from disclosure_check import disclosed_realised_figures
 from ar_text_cache import get_ar_pages
+from pipeline_db import init_run_db
 
 load_dotenv(find_dotenv())
 
@@ -145,7 +149,7 @@ PROMPT_3_SCHEMA = {
         "sti_pct_of_max": {"type": ["number", "string", "null"]},
         "sti_value": {"type": ["number", "string", "null"]},
         "sti_source_page": {"type": ["integer", "string", "null"]},
-        "lti_grant_years_tested": {"type": "array", "items": {"type": "string"}},
+        "lti_grant_years_tested": {"type": "array", "items": {"type": ["string", "integer"]}},
         "lti_vesting_pct": {"type": ["number", "string", "null"]},
         "lti_units": {"type": ["number", "string", "null"]},
         "lti_price_used": {"type": ["number", "string", "null"]},
@@ -153,7 +157,13 @@ PROMPT_3_SCHEMA = {
         "lti_fx_rate_applied": {"type": ["number", "string", "null"]},
         "lti_value": {"type": ["number", "string", "null"]},
         "lti_source_page": {"type": ["integer", "string", "null"]},
-        "ceo_realised_rem": {"type": ["number", "string", "null"]}
+        "ceo_realised_rem": {"type": ["number", "string", "null"]},
+        "ceo_served_part_year": {"type": "boolean"},
+        "not_disclosed_reason": {
+            "type": ["string", "null"],
+            "enum": ["no_realised_disclosure", "year_mismatch", "currency_mismatch",
+                     "table_not_found", "unresolvable_scale"]
+        }
     },
     "required": ["ceo_name", "target_fy", "source_method", "ceo_realised_rem"]
 }
@@ -901,6 +911,263 @@ def _parse_json_from_response(content: str) -> dict:
     return parsed
 
 
+def _validate_ceo_pay_semantics(data: dict) -> list[str]:
+    """Semantic plausibility checks that do not need page text.
+
+    A part-year CEO total is expected to be smaller than a full-year one, so the
+    0.8m floor is waived when `ceo_served_part_year` is set. The flag is a
+    qualifier on a real figure, not a reason to withhold one - NAB FY2024's
+    answer is $1.74m with `ceo_served_part_year` set, not a non-disclosure.
+    """
+    problems: list[str] = []
+    value_m = data.get("ceo_realised_rem")
+    if value_m is None:
+        return problems
+    try:
+        value_m = float(value_m)
+    except (TypeError, ValueError):
+        return problems
+    part_year = bool(data.get("ceo_served_part_year"))
+    if not part_year and value_m < 0.8:
+        problems.append(
+            f"implausibly low: {value_m}m is below the CEO-total band floor (0.8m)"
+        )
+    return problems
+
+
+# A cross-check reason that reconciles a gap between two figures must be backed
+# by the number it reconciles. Values describing a case with nothing to
+# reconcile (unrelated / not_comparable / unexplained) are not in this set.
+_RECONCILE_MECHANISMS = ("fx", "deferral_timing", "accounting_basis", "vesting_basis")
+
+
+def _make_ceo_pay_validator(pages_by_number: dict, company: str = None):
+    """Build a closure that validates a CEO realised-pay claim against pages.
+
+    The digit-only path is gone: a `$m` claim is now anchored to currency and
+    scale per row. Rio Tinto FY24 p.131 prints `8,450` under a `(\u00a3'000)`
+    heading, so a claim of 8.45m citing that page is rejected as GBP, not
+    silently accepted. A bare `$` is resolved against the issuer's reporting
+    currency (AUD for every ASX filer today) rather than assumed.
+
+    `not_disclosed` is a terminal state and must be provable: it is rejected
+    when a reason is missing, and when a figure was supplied alongside it.
+    """
+    bare_currency = reporting_currency_for(company) if company else "AUD"
+
+    def _validator(data: dict) -> list[str]:
+        errors: list[str] = []
+        basis = data.get("basis")
+        page_no = data.get("ceo_realised_rem_page")
+        value_m = data.get("ceo_realised_rem")
+        currency = data.get("currency")
+        figure_fy = data.get("figure_fy")
+        target_fy = data.get("target_fy")
+        not_disclosed_reason = data.get("not_disclosed_reason")
+
+        # not_disclosed is an escape hatch and must be earned: it is
+        # rejected when a reason is missing, when a figure was supplied
+        # alongside it, and when the pages actually publish a realised CEO
+        # row. NAB FY24 p.145 carries one and the model called it
+        # `no_realised_disclosure` live; that is a false negative, and the
+        # rejection redirects at the part-year flag rather than at the
+        # disclosure itself.
+        if basis == "not_disclosed":
+            if not not_disclosed_reason:
+                errors.append(
+                    "not_disclosed_reason must be populated when basis is not_disclosed"
+                )
+            if value_m is not None:
+                errors.append(
+                    "contradictory: a figure was supplied but basis is not_disclosed"
+                )
+            disclosed = disclosed_realised_figures(pages_by_number)
+            if disclosed:
+                first = disclosed[0]
+                pg = f"p.{first.page}" if first.page is not None else "the cited page"
+                errors.append(
+                    f"{pg} DO disclose realised remuneration: "
+                    f"{first.text[:120]!r}. The page publishes a CEO realised "
+                    f"total, so 'not_disclosed' is not provable here. If the "
+                    f"CEO served a part year, set ceo_served_part_year on the "
+                    f"figure rather than withholding it."
+                )
+            return errors
+
+        # Cross-check reconciliation: a mechanism that explains a gap between
+        # two figures must be backed by the number it reconciles. "unrelated",
+        # "not_comparable" and "unexplained" describe cases with nothing to
+        # reconcile and so need no calculation behind them.
+        explained_by = data.get("cross_check_explained_by")
+        calc_m = data.get("cross_check_calculated_m")
+        if explained_by in _RECONCILE_MECHANISMS and calc_m in (None, ""):
+            errors.append("cross_check_calculated_m is absent")
+
+        if page_no is None:
+            errors.append("ceo_realised_rem_page required for a disclosed figure")
+            return errors
+        page_text = pages_by_number.get(page_no)
+        if page_text is None:
+            errors.append(f"page {page_no} was not supplied")
+            return errors
+
+        if not currency:
+            errors.append("no currency was declared for the figure")
+        elif currency != "AUD":
+            errors.append(
+                f"non_aud_currency: figure currency is {currency}, expected AUD"
+            )
+
+        if figure_fy and target_fy and figure_fy != target_fy:
+            errors.append(
+                f"year_mismatch: figure_fy={figure_fy} != target_fy={target_fy}"
+            )
+
+        if value_m is None:
+            errors.append("ceo_realised_rem must be populated for a disclosed figure")
+            return errors
+
+        try:
+            value_m = float(value_m)
+        except (TypeError, ValueError):
+            errors.append(f"ceo_realised_rem is not a number: {value_m!r}")
+            return errors
+
+        # Currency- and scale-anchored match. A near-miss is reported as a
+        # currency problem ("8.45 is here but it is GBP, not AUD") rather than
+        # as a bare absence, which is what makes the rejection actionable.
+        if contains_aud_million(page_text, value_m, page_no, bare_currency=bare_currency):
+            pass
+        else:
+            near = near_miss_currencies(
+                page_text, value_m, page_no, bare_currency=bare_currency
+            )
+            if near:
+                cur = ",".join(sorted({f.currency for f in near if f.currency}))
+                errors.append(
+                    f"currency_mismatch: {value_m}m found on page {page_no} but in "
+                    f"{cur}, not AUD"
+                )
+            else:
+                errors.append(
+                    f"value_not_found: {value_m}m not found on page {page_no}"
+                )
+
+        if value_m < 0.8 and not data.get("ceo_served_part_year"):
+            errors.append(
+                f"implausibly low: {value_m}m is below the CEO-total band floor (0.8m)"
+            )
+
+        return errors
+
+    return _validator
+
+
+def _parse_call_name(call_name: str) -> tuple[str, int | None]:
+    """Split a call_name into (extractor, fiscal_year) for checkpoint keys.
+
+    prompt_1a / prompt_1b / prompt_4 carry no year and are keyed to 0; the
+    per-year prompts (prompt_2_fy2022, prompt_3_fy2026) carry the year they
+    were run for, which is what makes a partial run resumable.
+    """
+    m = re.search(r"fy(\d{4})", call_name, re.IGNORECASE)
+    fiscal_year = int(m.group(1)) if m else None
+    if call_name.startswith("prompt_1a"):
+        extractor = "prompt_1a"
+    elif call_name.startswith("prompt_1b"):
+        extractor = "prompt_1b"
+    elif call_name.startswith("prompt_2"):
+        extractor = "prompt_2"
+    elif call_name.startswith("prompt_3"):
+        extractor = "prompt_3"
+    elif call_name.startswith("prompt_4"):
+        extractor = "prompt_4"
+    else:
+        extractor = call_name
+    return extractor, fiscal_year
+
+
+def _make_checkpointed_call(db, run_id: str, logger):
+    """Return a _call_llm-compatible wrapper backed by SQLite checkpointing.
+
+    The wrapper is a drop-in for `_call_llm`: same signature, same return
+    value. It adds per-(extractor, fiscal_year) resume so a run interrupted by
+    a rate limit does not redo completed work, and it logs each attempt to
+    call_log. The original `_call_llm` is called unchanged, so all its retry,
+    fallback and metadata behaviour is preserved.
+    """
+    import threading
+
+    _sem = threading.Semaphore(2)
+
+    def _ensure_checkpoint(extractor: str, ck_year: int) -> None:
+        """Idempotently create a pending checkpoint row if one is missing.
+
+        start_checkpoint updates an existing row; without this a checkpoint
+        that was never registered in init_checkpoints would silently no-op,
+        and resume would not work for ad-hoc call names.
+        """
+        conn = db._get_conn()
+        conn.execute(
+            "INSERT OR IGNORE INTO extraction_checkpoints "
+            "(run_id, extractor, fiscal_year, status, attempt) "
+            "VALUES (?, ?, ?, 'pending', 0)",
+            (run_id, extractor, ck_year),
+        )
+
+    def _wrapped(client, model, prompt_text, user_content, logger=None,
+                 fallback_model=None, max_retries=3, call_name="llm_call",
+                 supporting_data_dir=None, json_validation_retries=2):
+        extractor, fiscal_year = _parse_call_name(call_name)
+        ck_year = fiscal_year if fiscal_year is not None else 0
+
+        # Resume: a completed checkpoint returns its stored result verbatim.
+        cp = db.get_checkpoint_status(run_id, extractor, ck_year)
+        if cp and cp.get("status") == "completed" and cp.get("result_json"):
+            if logger:
+                logger.info(f"[{call_name}] checkpoint completed, skipping")
+            return json.loads(cp["result_json"])
+
+        _ensure_checkpoint(extractor, ck_year)
+        db.start_checkpoint(run_id, extractor, ck_year)
+
+        with _sem:
+            # Double-check inside the semaphore: another worker may have
+            # completed it while we were waiting.
+            cp = db.get_checkpoint_status(run_id, extractor, ck_year)
+            if cp and cp.get("status") == "completed" and cp.get("result_json"):
+                if logger:
+                    logger.info(f"[{call_name}] checkpoint completed by another worker, skipping")
+                return json.loads(cp["result_json"])
+
+            start = time.time()
+            try:
+                result = _call_llm(
+                    client, model, prompt_text, user_content, logger,
+                    fallback_model, max_retries, call_name,
+                    supporting_data_dir, json_validation_retries,
+                )
+                db.log_call(
+                    run_id, extractor, fiscal_year, model, 0, 0,
+                    int((time.time() - start) * 1000), "success", None,
+                )
+                db.complete_checkpoint(
+                    run_id, extractor, ck_year, result=result,
+                )
+                return result
+            except Exception as err:
+                db.log_call(
+                    run_id, extractor, fiscal_year, model, 0, 0,
+                    int((time.time() - start) * 1000), "error", str(err)[:500],
+                )
+                db.complete_checkpoint(
+                    run_id, extractor, ck_year, error=str(err)[:500],
+                )
+                raise
+
+    return _wrapped
+
+
 def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=None) -> bool:
     """
     Extract 5-year financial performance history from annual reports.
@@ -942,7 +1209,25 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
         base_url="https://openrouter.ai/api/v1",
         api_key=API_KEY
     )
-    
+
+    # Checkpointing: wrap _call_llm so each (extractor, fiscal_year) call is
+    # resumable. A run interrupted by a rate limit resumes from the last
+    # completed checkpoint instead of redoing work. The wrapper is local to
+    # this function, so every call site below picks it up unchanged.
+    if supporting_data_dir is not None:
+        db, run_id = init_run_db(supporting_data_dir)
+        years = list(range(latest_year - 4, latest_year + 1))
+        db.init_checkpoints(
+            run_id,
+            ["prompt_1a", "prompt_1b", "prompt_2", "prompt_3", "prompt_4"],
+            years,
+        )
+        _call_llm = _make_checkpointed_call(db, run_id, logger)
+        if logger:
+            logger.info(f"Checkpointing enabled: run_id={run_id}")
+    else:
+        run_id = None
+
     # Initialize compiled result
     compiled = {
         "company": "",
@@ -1253,6 +1538,27 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
                 PERFORMANCE_FALLBACK_MODEL, call_name=f"prompt_3_fy{yr}", supporting_data_dir=supporting_data_dir
             )
             
+            # Currency- and scale-anchored validation against the cited page.
+            # A digit-only match would pass a $m claim against a GBP table, so
+            # the validator resolves currency per row and rejects near-misses
+            # with the offending currency named rather than as a bare absence.
+            pages_by_number = {p["page_number"]: p.get("text") or "" for p in ar_pages}
+            validator = _make_ceo_pay_validator(pages_by_number, ticker)
+            claim = dict(result_3)
+            claim.setdefault("target_fy", str(yr))
+            v_errors = validator(claim)
+            if v_errors:
+                if logger:
+                    logger.warning(
+                        f"Prompt 3: FY{yr} CEO pay claim rejected by validator: "
+                        + "; ".join(v_errors)
+                    )
+                compiled.setdefault("audit_notes", []).append(
+                    f"FY{yr} CEO realised pay rejected by validator: "
+                    + "; ".join(v_errors)
+                )
+                continue
+
             if result_3.get("ceo_realised_rem") is not None:
                 ceo_rem = result_3["ceo_realised_rem"]
                 # Safety check: if value > 1000000, it's likely in raw dollars

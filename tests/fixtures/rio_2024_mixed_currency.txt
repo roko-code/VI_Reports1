@@ -1,0 +1,58 @@
+# Real extract: Rio Tinto FY2024 Annual Report, pp.138 and 140.
+# Retained because currency is a PER-ROW attribute in these tables, not a
+# per-page one. Any currency logic anchored at page level is wrong here.
+
+## p.138 - Chief Executive's remuneration over time (A$ and GBP mixed)
+```
+Chief Executive’s remuneration over time
+Single total figure Annual STIP Long-term incentive
+of remuneration award against vesting against maximum
+Year Chief Executive (’000) maximum opportunity opportunity (PSA)
+2014 Sam Walsh A$10,476 88.4% 49%
+2015 Sam Walsh A$9,141 81.9% 43.6%
+2016 Sam Walsh1 A$5,772 68.2% 50.5%
+2016 Jean-Sébastien Jacques £3,116 82.4% 50.5%
+2017 Jean-Sébastien Jacques £3,821 73.4% 66.7%
+2018 Jean-Sébastien Jacques £4,551 70.1% 43%
+2019 Jean-Sébastien Jacques £5,999 74.8% 76%
+2020 Jean-Sébastien Jacques £8,670 0% 66.7%
+2021 Jakob Stausholm2 £2,788 61.3% –
+2022 Jakob Stausholm3 £5,010 48.7% 100%
+2023 Jakob Stausholm £8,450 56% 94.1%
+1. STIP award and PSA vesting percentages restated following release from the deed of deferral as described in prior Remuneration reports.
+2. Jakob Stausholm joined Rio Tinto in September 2018 and became Chief Executive on 1 January 2021. Therefore, he did not participate in the 2017 LTIP which vested at 66.7% of maximum.
+3. The 2022 single total figure of remuneration for Jakob Stausholm reported in the 2022 Remuneration report was £4.8 million based on the estimated value of the 2018 PSA which vested at
+100%. The single total figure of remuneration for 2022 shown above is restated and based on the actual vesting share price of £59.83.
+The effect of performance on the value of shareholdings, as measured by TSR delivered over the
+```
+
+## p.140 - STIP awards (GBP/SGD/A$/C$ mixed) and CEO pay ratio
+```
+The 2023 STIP awards are detailed in the table below.
+Percentage of:
+2023 STIP award 2023 STIP award Maximum STIP Maximum STIP
+(% of salary) ('000) awarded forfeited
+Bold Baatar 140% £941 70% 30%
+Alfredo Barrios 84% SGD981 42% 58%
+Sinead Kaufman 112% A$1,188 56% 44%
+Jérôme Pécresse 112% C$258 56% 44%
+Simon Trott 140% A$1,650 70% 30%
+Share ownership Broader employee disclosures
+The following table shows the share ownership level for other KMP as Chief Executive pay ratio
+a multiple of base salary.
+The ratio of the single total figure of remuneration for the Chief
+Share ownership level at Executive to the lower quartile, median and upper quartile Rio Tinto
+31 December 2023 as a Australian employee population for 2023 is set out in the table below.
+multiple of base salary
+Bold Baatar 5.9 Lower quartile Median Upper quartile
+Alfredo Barrios 4.5 2023 116 97 81
+Sinead Kaufman 6.2 2022 1 76 52 42
+Jérôme Pécresse 0.4
+1. The 2022 pay ratio data has been restated based on actual pay outcomes for the Chief Simon Trott 5.4
+Executive in 2022.
+Share ownership level is calculated using the market price of Rio Tinto The median CEO pay ratio of 97:1 is higher than last year, primarily
+shares on 31 December 2023, and we define “share ownership” in due to the vesting of Jakob’s first full LTIP award from 2019 which
+our Policy. vested at 94.1% at the end of the 2023 performance year. The
+Committee continues to be mindful of the relationship between
+Service contracts executive remuneration and th
+```

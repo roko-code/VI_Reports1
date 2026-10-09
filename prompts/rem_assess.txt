@@ -30,8 +30,19 @@ Optional (use if supplied, otherwise see "Handling missing evidence" below):
 5. Prior ASA Voting Intentions / AGM report for this company — also needed for REM-M03, to check whether previously raised concerns were addressed.
 6. Peer company remuneration reports, where ASA/CMC has already selected specific peers for comparison.
 7. A CEO/KMP remuneration comparator dataset (CSV), covering a universe of companies with one row per executive per financial year. If supplied, see "Using the comparator CSV" below for the exact fields and how to use them.
+8. A pre-fetched block of news search results covering roughly the past 12 months. Supplementary context only - see "Using the news search results" below.
 
-At the start of your output, before the assessment tables, list which of documents 1–7 you were actually given, and which are missing. This is factual bookkeeping, not part of the guideline assessment itself.
+At the start of your output, before the assessment tables, list which of documents 1–8 you were actually given, and which are missing. This is factual bookkeeping, not part of the guideline assessment itself.
+
+
+USING THE NEWS SEARCH RESULTS (DOCUMENT 8)
+
+Each entry in the news block includes a headline, a short snippet, a source, a publication date and a URL. Before using any entry:
+- Confirm it is clearly about this company (matching the full legal name and/or ASX ticker), not a similarly-named company, a subsidiary of a different parent, or an unrelated entity. Discard anything ambiguous rather than guessing.
+- Treat each snippet as an unverified lead, not a confirmed fact. If a news item bears on a guideline, frame it as "media reporting described X; the Annual Report does not address this" rather than asserting the event happened.
+- Use it only where it bears on a guideline in scope - for example remuneration-related controversy, executive misconduct or departure reporting, pay concerns raised by proxy advisers or shareholders outside the Annual Report, or reported changes to remuneration practice. Do not bring in general company news that has no bearing on the remuneration assessment.
+- Cite any item you rely on as [Source, "headline", DD Mon YYYY, URL], distinct from the [p.N] page-citation format used for the other documents.
+- If the block is empty, contains nothing relevant, or was not supplied, note that in the document inventory and move on - do not speculate or invent a plausible-sounding news item.
 
 
 IDENTIFYING THE SUBJECT MATTER

@@ -3,10 +3,17 @@ import json
 import re
 import shutil
 from pathlib import Path
+from typing import Optional
 import pypdf
 from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
 from logging_utils import write_supporting_text
+from ar_text_cache import get_ar_pages
+from ar_retrieval import STAGE6_SPECS, build_context, write_manifest
+from citation_check import check_citations, format_problems
+from news_search_results import load_news_block
+from ar_file_lookup import find_ar_file as _find_ar_file_lookup, parse_year_from_stem
+from llm_config import director_assess_models
 
 # Environment setup
 load_dotenv(find_dotenv())
@@ -15,9 +22,12 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not API_KEY:
     raise ValueError("OPENROUTER_API_KEY not found in .env file.")
 
-# Model Configurations (Clean OpenRouter IDs, stage-specific env vars)
-DIRECTOR_ASSESS_PRIMARY_MODEL = os.getenv("DIRECTOR_ASSESS_PRIMARY_MODEL", "stealth/ox-alpha")
-DIRECTOR_ASSESS_FALLBACK_MODEL = os.getenv("DIRECTOR_ASSESS_FALLBACK_MODEL", "google/gemini-2.0-flash-exp:free")
+# Model Configurations (supports global override via LLM_PRIMARY_OVERRIDE / LLM_FALLBACK_OVERRIDE)
+DIRECTOR_ASSESS_PRIMARY_MODEL, DIRECTOR_ASSESS_FALLBACK_MODEL = director_assess_models()
+
+# Character budget for retrieved Annual Report sections. Verified in
+# src/retrieval_selftest.py against all 14 cached reports.
+AR_BUDGET_CHARS = int(os.getenv("AR_BUDGET_CHARS", "200000"))
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
@@ -68,16 +78,22 @@ def has_director_resolutions(nom_data: dict) -> bool:
     return False
 
 
-def find_matching_ar(json_stem: str, ar_dir: Path) -> Path:
-    """Matches NoM JSON (e.g. BHP_2026_NOM) with raw AR PDF (e.g. BHP_2026_AR.pdf)."""
-    prefix = json_stem.replace("_NOM", "").replace("_nom", "")
+def find_matching_ar(json_stem: str, ar_dir: Path, logger=None) -> Optional[Path]:
+    """Match a NoM JSON stem (e.g. ``BHP_2026_NOM``) to its AR PDF.
 
-    ar_files = list(ar_dir.glob("*.pdf"))
-    for ar_file in ar_files:
-        if prefix.lower() in ar_file.stem.lower():
-            return ar_file
-
-    return None
+    Falls back to the most recent available AR when the target-year AR is
+    absent. Delegates to ``ar_file_lookup.find_ar_file`` so the year rule is
+    identical to Stages 5/8/9. The previous two-sort-rule implementation
+    agreed with this one for standard ``{TICKER}_{YEAR}_AR.pdf`` names but
+    diverged on edge cases.
+    """
+    year = parse_year_from_stem(json_stem)
+    if year is None:
+        if logger:
+            logger.warning(f"Could not parse year from NoM stem '{json_stem}'")
+        return None
+    lookup = _find_ar_file_lookup(ar_dir.parent, year, fallback=True, logger=logger, ar_dir_name=ar_dir.name)
+    return lookup.path if lookup else None
 
 
 def call_llm_with_fallback(client: OpenAI, system_prompt: str, user_payload: str, logger=None) -> str:
@@ -136,8 +152,12 @@ def call_llm_with_fallback(client: OpenAI, system_prompt: str, user_payload: str
     return response.choices[0].message.content.strip()
 
 
-def run_director_assessment(json_path: Path, ar_path: Path, asa_text: str, client: OpenAI, system_prompt: str, reports_dir: Path, supporting_data_dir: Path = None, logger=None, archive_dir: Path = None):
-    """Executes LLM evaluation using JSON, Annual Report, and ASA Guidelines."""
+def run_director_assessment(json_path: Path, ar_path: Path, asa_text: str, client: OpenAI, system_prompt: str, reports_dir: Path, supporting_data_dir: Path = None, logger=None, archive_dir: Path = None, news_block: str = ""):
+    """Executes LLM evaluation using JSON, Annual Report, and ASA Guidelines.
+
+    news_block: pre-fetched news search results (Stage 7.5), supplied as
+    supplementary external context. Empty string omits the section.
+    """
     if logger:
         logger.info(f"Processing Director Assessment for: {json_path.name} + {ar_path.name}")
     print(f"\nProcessing Director Assessment for: {json_path.name} + {ar_path.name}")
@@ -151,16 +171,58 @@ def run_director_assessment(json_path: Path, ar_path: Path, asa_text: str, clien
             logger.info(f"Skipping {json_path.name}: no director resolutions detected")
         return False
 
-    ar_text = extract_pdf_text(ar_path)
+    # Retrieve the director, governance and conflicts-of-interest sections
+    # rather than passing the whole Annual Report. The full text of a large
+    # report exceeds the model context window outright, so this call was
+    # previously either rejected or silently truncated by the provider.
+    ar_match = re.search(r"(\d{4})", ar_path.stem)
+    ar_year = int(ar_match.group(1)) if ar_match else 0
+    ticker = ar_path.stem.split("_")[0].upper()
+
+    ar_pages = get_ar_pages(ticker, ar_year, ar_path, logger=logger)
+    ar_retrieval = build_context(
+        ar_pages,
+        STAGE6_SPECS,
+        budget_chars=AR_BUDGET_CHARS,
+        logger=logger,
+    )
+    ar_text = ar_retrieval.text
+    if supporting_data_dir:
+        write_manifest(
+            ar_retrieval, supporting_data_dir, "stage6", ticker, ar_year, logger=logger
+        )
+    if logger:
+        logger.info(
+            f"AR retrieval: {len(ar_retrieval.included_pages)}/"
+            f"{ar_retrieval.total_pages} pages, {ar_retrieval.chars_used:,} chars"
+        )
+        if ar_retrieval.missing_mandatory:
+            if logger:
+                logger.warning(
+                    "Stage 6 could not locate mandatory sections: "
+                    + ", ".join(ar_retrieval.missing_mandatory)
+                    + ". Rules depending on these will be assessed as Uncertain."
+                )
 
     user_payload = (
+        f"{ar_retrieval.coverage_note()}\n\n"
         f"=== INPUT 1: NOTICE OF MEETING EXTRACTED JSON ===\n"
         f"{json.dumps(nom_data, indent=2)}\n\n"
         f"=== INPUT 2: ASA DIRECTOR ELECTION GUIDELINES ===\n"
         f"{asa_text}\n\n"
-        f"=== INPUT 3: ANNUAL REPORT TEXT ===\n"
+        f"=== INPUT 3: ANNUAL REPORT (retrieved sections) ===\n"
         f"{ar_text}"
     )
+
+    # Pre-fetched news (Stage 7.5). Supplementary external context for
+    # candidate due diligence; the prompt verifies company/candidate match
+    # and treats items as unverified leads. Omitted entirely when absent so
+    # the model is not shown an empty input.
+    if news_block and news_block.strip():
+        user_payload += (
+            "\n\n=== INPUT 4: NEWS SEARCH RESULTS (pre-fetched, ~12 months) ===\n"
+            f"{news_block}"
+        )
 
     if logger:
         logger.info(f"Requesting LLM assessment for {json_path.name} via {DIRECTOR_ASSESS_PRIMARY_MODEL}")
@@ -170,6 +232,18 @@ def run_director_assessment(json_path: Path, ar_path: Path, asa_text: str, clien
     # Save raw LLM response to supporting data
     if supporting_data_dir:
         write_supporting_text(supporting_data_dir, f"{json_path.stem}_raw_llm.txt", result_md)
+        # Citation integrity - Stage 6 has never validated its [p.N] citations.
+# Logged, not enforced; see citation_check for the scope limit.
+        try:
+            rep = check_citations(result_md, ar_retrieval.included_pages)
+            for problem in format_problems(rep):
+                if logger:
+                    logger.warning(f"Stage 6 citation check: {problem}")
+                if logger:
+                    logger.info(f"Stage 6 citation check: {rep.summary()}")
+        except Exception as e:                  # never fail the stage on this
+            if logger:
+                logger.warning(f"Stage 6 citation check could not run: {e}")
         if logger:
             logger.info(f"Raw LLM response saved for {json_path.name}")
 
@@ -183,7 +257,10 @@ def run_director_assessment(json_path: Path, ar_path: Path, asa_text: str, clien
     report_filename = f"{json_path.stem}_Director_Evaluation.md"
     report_path = reports_dir / report_filename
     report_path.write_text(result_md, encoding="utf-8")
-    print(f" Report saved -> {report_path.relative_to(BASE_DIR)}")
+    try:
+        print(f" Report saved -> {report_path.relative_to(BASE_DIR)}")
+    except ValueError:
+        print(f" Report saved -> {report_path}")
     if logger:
         logger.info(f"Report saved: {report_path.name}")
 
@@ -216,7 +293,7 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
 
     json_files = list(workspace_nom_json_dir.glob("*.json"))
     if not json_files:
-        print(f"No pending NoM JSON files found in {workspace_nom_json_dir.relative_to(BASE_DIR)}")
+        print(f"No pending NoM JSON files found in {workspace_nom_json_dir}")
         if logger:
             logger.warning("No pending NoM JSON files found")
         return False
@@ -231,17 +308,23 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
         api_key=API_KEY
     )
 
+    # Pre-fetched news (Stage 7.5), loaded once and shared by every
+    # per-candidate assessment call in this run.
+    news_block = load_news_block(workspace_dir)
+    if logger:
+        logger.info(f"Stage 6 news context: {'supplied' if news_block.strip() else 'not available'}")
+
     success_count = 0
     for json_path in json_files:
         ar_path = find_matching_ar(json_path.stem, annual_reports_dir)
         if not ar_path:
-            print(f" Warning: No matching Annual Report found in {annual_reports_dir.relative_to(BASE_DIR)} for {json_path.name}. Skipping.")
+            print(f" Warning: No matching Annual Report found in {annual_reports_dir} for {json_path.name}. Skipping.")
             if logger:
                 logger.warning(f"No matching AR found for {json_path.name}")
             continue
 
         try:
-            result = run_director_assessment(json_path, ar_path, asa_text, client, system_prompt, workspace_reports_dir, supporting_data_dir, logger, workspace_nom_json_archive_dir)
+            result = run_director_assessment(json_path, ar_path, asa_text, client, system_prompt, workspace_reports_dir, supporting_data_dir, logger, workspace_nom_json_archive_dir, news_block=news_block)
             if result:
                 success_count += 1
         except Exception as e:

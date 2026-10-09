@@ -11,12 +11,15 @@ import re
 import time
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any
 
 from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
 
 from logging_utils import write_supporting_json, write_supporting_text
+from news_search_results import load_news_block, has_news_results
+from llm_json import parse_llm_json
+from llm_config import audit_models
 
 load_dotenv(find_dotenv())
 
@@ -24,8 +27,7 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not API_KEY:
     raise ValueError("OPENROUTER_API_KEY not found in .env file.")
 
-AUDIT_PRIMARY_MODEL = os.getenv("AUDIT_PRIMARY_MODEL", "openai/gpt-4.1-mini")
-AUDIT_FALLBACK_MODEL = os.getenv("AUDIT_FALLBACK_MODEL", "google/gemini-3.1-flash-lite")
+AUDIT_PRIMARY_MODEL, AUDIT_FALLBACK_MODEL = audit_models()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
@@ -83,7 +85,7 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
     
     if nom_json_files:
         try:
-            with open(nom_json_files[0]) as f:
+            with open(nom_json_files[0], encoding="utf-8") as f:
                 nom_data = json.load(f)
             
             if "Voting_Resolutions" not in nom_data and "voting_resolutions" not in nom_data:
@@ -110,7 +112,7 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
         issues.append({"check": "Performance history", "status": "FAIL", "detail": "performance_history_5yr.json not found"})
     else:
         try:
-            with open(perf_path) as f:
+            with open(perf_path, encoding="utf-8") as f:
                 perf_data = json.load(f)
             
             extraction_status = perf_data.get("extraction_status", "unknown")
@@ -180,24 +182,25 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
         issues.append({"check": "Director assessment", "status": "WARN", "detail": "No Director Evaluation output found"})
     
     # Check 4: Remuneration Assessment
-    rem_assess = list((workspace_dir / "reports").glob("*Remuneration_Assessment*"))
-    if rem_assess:
-        try:
-            with open(rem_assess[0]) as f:
-                rem_data = json.load(f)
-            m01 = [r for r in rem_data.get("section_2", []) if r.get("rule") == "REM-M01"]
-            if m01:
-                res = rem_data.get("section_3", [])
-                pass_count = sum(1 for r in res if r.get("ai_result") == "P")
-                fail_count = sum(1 for r in res if r.get("ai_result") == "F")
-                uncertain_count = sum(1 for r in res if r.get("ai_result") in ["U", "Uncertain"])
-                if uncertain_count > len(res) * 0.5:
-                    issues.append({"check": "Remuneration assessment", "status": "WARN", 
-                                  "detail": f"{uncertain_count}/{len(res)} results are Uncertain - source docs may be insufficient"})
-        except Exception as e:
-            issues.append({"check": "Remuneration assessment", "status": "WARN", "detail": f"Cannot parse: {e}"})
-    else:
+    rem_assess_md = list((workspace_dir / "reports").glob("*Remuneration_Assessment.md"))
+    rem_assess_json = list((workspace_dir / "extracted_json").glob("*Remuneration_Assessment.json"))
+    if not rem_assess_md and not rem_assess_json:
         issues.append({"check": "Remuneration assessment", "status": "WARN", "detail": "No Remuneration Assessment output found"})
+    else:
+        try:
+            if rem_assess_json:
+                with open(rem_assess_json[0], encoding="utf-8") as f:
+                    rem_data = json.load(f)
+                # Check if the assessment has content
+                raw_content = rem_data.get("raw_content", "")
+                if raw_content:
+                    # Count uncertain results by looking for common patterns
+                    uncertain_count = raw_content.lower().count("unc")
+                    if uncertain_count > 5:
+                        issues.append({"check": "Remuneration assessment", "status": "WARN", 
+                                    "detail": f"Many 'Uncertain' results detected in markdown - source docs may be insufficient"})
+        except Exception as e:
+            issues.append({"check": "Remuneration assessment", "status": "WARN", "detail": f"Cannot parse JSON: {e}"})
     
     # Check 5: Other Resolutions Assessment
     other_assess = list((workspace_dir / "reports").glob("*Other_Resolutions_Assessment*"))
@@ -205,7 +208,7 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
         issues.append({"check": "Other resolutions", "status": "WARN", "detail": "No Other Resolutions Assessment output found"})
     else:
         try:
-            with open(other_assess[0]) as f:
+            with open(other_assess[0], encoding="utf-8") as f:
                 other_data = json.load(f)
             resolutions = other_data.get("resolution_categorisation", [])
             in_scope = [r for r in resolutions if r.get("category") == "in_scope"]
@@ -224,9 +227,11 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
         issues.append({"check": "Annual reports", "status": "WARN", 
                       "detail": f"Only {len(ar_files)}/{expected_years} AR files present"})
     
-    # Check 7: VI Reports exist
+    # Check 7: VI Reports exist. Count only *_VIR.pdf: the vi_reports/
+    # directory also holds AGM/EGM reports (Stage 3), which must not mask
+    # missing VI reports.
     vi_dir = workspace_dir / "vi_reports"
-    vi_files = list(vi_dir.glob("*.pdf")) if vi_dir.exists() else []
+    vi_files = list(vi_dir.glob("*_VIR.pdf")) if vi_dir.exists() else []
     if len(vi_files) < expected_years:
         issues.append({"check": "VI Reports", "status": "WARN", 
                       "detail": f"Only {len(vi_files)}/{expected_years} VI reports present"})
@@ -235,7 +240,7 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
     state_path = workspace_dir / "state.json"
     if state_path.exists():
         try:
-            with open(state_path) as f:
+            with open(state_path, encoding="utf-8") as f:
                 state = json.load(f)
             pipeline_status = state.get("pipeline_status", {})
             extracted_data = state.get("extracted_data", {})
@@ -265,7 +270,7 @@ def _build_audit_summary(workspace_dir: Path, auto_issues: List[Dict], logger=No
     # Pipeline state
     state_path = workspace_dir / "state.json"
     if state_path.exists():
-        with open(state_path) as f:
+        with open(state_path, encoding="utf-8") as f:
             state = json.load(f)
         summary_parts.append("## Pipeline State")
         for k, v in state.get("pipeline_status", {}).items():
@@ -303,6 +308,20 @@ def _build_audit_summary(workspace_dir: Path, auto_issues: List[Dict], logger=No
             summary_parts.append(f"- FY{fy}: ${pay.get('value_m', 0):.2f}m ({pay.get('source_method')})")
     
     return "\n".join(summary_parts)
+
+
+def _audit_passes(audit_result: dict) -> bool:
+    """Whether the audit gate passes: the data-quality score must clear the
+    threshold recorded on the result.
+
+    The qualitative ``overall_assessment`` (PASS/PARTIAL/FAIL) is recorded in
+    the output but does not gate - a score below threshold must fail the
+    stage even when the LLM says PARTIAL. An earlier version read
+    ``audit_result.get("aurdit_passed_threshold")`` (a typo of the key set two
+    lines above), so the lookup always returned None and the gate silently
+    degenerated to ``overall_assessment != "FAIL"``.
+    """
+    return bool(audit_result.get("audit_passed_threshold"))
 
 
 def run_audit(workspace_dir: Path, supporting_data_dir: Path, logger=None) -> bool:
@@ -351,6 +370,12 @@ Review the provided audit summary and identify:
 4. Any stage outputs that should be re-run
 5. Overall assessment of pipeline completeness
 
+If a "SUPPLEMENTARY: NEWS SEARCH RESULTS" block is included in the user
+message, it is pre-fetched news context - NOT a pipeline output. Do not audit
+it, do not list it as a missing document, and do not raise its (non-)use as a
+data-quality issue. Use it only to sanity-check whether an assessment's factual
+claims are consistent with publicly reported events.
+
 Output as JSON:
 {
   "overall_assessment": "PASS|PARTIAL|FAIL",
@@ -387,6 +412,18 @@ Output as JSON:
                 for fix in rem_result.get("fixes", []):
                     audit_summary += f"- FIXED: {fix.get('change', '')}\n"
         
+        # Supplementary context: pre-fetched news (Stage 7.5). Included only
+        # when results actually exist - when absent, the model is not shown a
+        # "no news" marker that it might flag as a missing document.
+        audit_user_content = f"Company: {ticker} FY{year}\n\n{audit_summary}"
+        if has_news_results(workspace_dir):
+            audit_user_content = (
+                f"Company: {ticker} FY{year}\n\n"
+                f"## SUPPLEMENTARY: NEWS SEARCH RESULTS (pre-fetched, NOT a pipeline output)\n\n"
+                f"{load_news_block(workspace_dir)}\n\n"
+                f"{audit_summary}"
+            )
+
         # Step 3: Send to LLM for qualitative review
         _token_bucket.take()
         
@@ -395,25 +432,17 @@ Output as JSON:
                 model=AUDIT_PRIMARY_MODEL,
                 messages=[
                     {"role": "system", "content": prompt},
-                    {"role": "user", "content": f"Company: {ticker} FY{year}\n\n{audit_summary}"}
+                    {"role": "user", "content": audit_user_content}
                 ],
                 timeout=120.0
             )
             
             content = response.choices[0].message.content
             if content:
-                content = content.strip()
-                if content.startswith("```json"):
-                    content = content[7:-3].strip()
-                elif content.startswith("```"):
-                    content = content[3:-3].strip()
-                
-                start = content.find('{')
-                end = content.rfind('}')
-                if start >= 0 and end > start:
-                    content = content[start:end+1]
-                
-                audit_result = json.loads(content)
+                try:
+                    audit_result = parse_llm_json(content.strip())
+                except ValueError as ve:
+                    audit_result = {"error": f"LLM JSON parse failed: {ve}"}
             else:
                 audit_result = {"error": "LLM returned empty response"}
         except Exception as e:
@@ -423,17 +452,15 @@ Output as JSON:
                 response = client.chat.completions.create(
                     model=AUDIT_FALLBACK_MODEL,
                     messages=[{"role": "system", "content": prompt},
-                              {"role": "user", "content": f"Company: {ticker} FY{year}\n\n{audit_summary}"}],
+                            {"role": "user", "content": audit_user_content}],
                     timeout=120.0
                 )
                 content = response.choices[0].message.content
                 if content:
-                    content = content.strip()
-                    start = content.find('{')
-                    end = content.rfind('}')
-                    if start >= 0 and end > start:
-                        content = content[start:end+1]
-                    audit_result = json.loads(content)
+                    try:
+                        audit_result = parse_llm_json(content.strip())
+                    except ValueError as ve:
+                        audit_result = {"error": f"Fallback LLM JSON parse failed: {ve}"}
                 else:
                     audit_result = {"error": "Fallback LLM returned empty response"}
             except Exception as e2:
@@ -507,7 +534,11 @@ Output as JSON:
     if audit_result.get('summary'):
         print(f"\n Summary: {audit_result['summary'][:200]}...")
     
-    audit_passed = audit_result.get("aurdit_passed_threshold") or audit_result.get("overall_assessment") != "FAIL"
+    # Same gate the remediation loop already uses to stop remediating
+    # (score >= threshold). The old line read "aurdit_passed_threshold" -
+    # a typo - so this .get() always returned None and the gate degenerated
+    # to overall_assessment != "FAIL": a PARTIAL below threshold passed.
+    audit_passed = _audit_passes(audit_result)
     
     if logger:
         logger.stage_end("Stage 7 Audit: Data Quality Audit", audit_passed)
