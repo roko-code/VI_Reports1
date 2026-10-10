@@ -569,73 +569,94 @@ def _populate_ceo_remuneration_table(doc: docx.Document, rem_markdown: str) -> N
     
     table = doc.tables[3]
     
-    # Default values
-    fixed_target = "\u2014"
-    sti_cash_target = "\u2014"
-    sti_cash_max = "\u2014"
-    lti_target = "\u2014"
-    total_target = "\u2014"
-    total_max = "\u2014"
-    
     lines = rem_markdown.split('\n')
-    
+
+    # Parsed amounts in $millions (None = not found).
+    fixed = None
+    sti_cash = None          # STI cash tranche (30%)
+    sti_total = None         # total profit share (cash + retained equity)
+    sti_max_total = None     # maximum profit share before risk adjustment
+    lti = None
+
+    def _amount(text: str):
+        """Return a $-amount as a float in $millions, or None."""
+        m = re.search(r'\$\s*([\d.,]+)(?:\s*m)?', text, re.IGNORECASE)
+        if not m:
+            return None
+        val = float(m.group(1).replace(',', ''))
+        # A trailing 'm' means the figure is already in $millions.
+        return val if re.search(r'\$\s*[\d.,]+\s*m', text, re.IGNORECASE) else val / 1_000_000.0
+
     for line in lines:
-        # Look for the framework line
-        if 'Target and maximum framework' in line or ('Fixed pay' in line and 'STI' in line and 'LTI' in line):
-            # Classify dollar amounts by the phrase that precedes them, so the
-            # parser tolerates each issuer's wording (SUN "Fixed pay: $2.185m",
-            # NAB "CEO fixed pay (FR) $2,500,000", MQG "CEO fixed remuneration:
-            # $1,526,819 ... Target STI: $6,300,000 ... LTI target face value
-            # approx. $4m") instead of assuming a single template.
-            for amt in re.finditer(r'\$\s*([\d.,]+)(?:\s*m)?', line):
-                raw = amt.group(1)
-                try:
-                    val = _parse_money_value(amt.group(0))
-                except Exception:
-                    continue
-                if val == "\u2014":
-                    continue
-                ctx = line[max(0, amt.start() - 60): amt.start()].lower()
-                if fixed_target == "\u2014" and ('fixed' in ctx and 'remuneration' in ctx or 'fixed pay' in ctx or 'fixed remuneration' in ctx):
-                    fixed_target = val
-                elif 'sti' in ctx and ('target' in ctx or 'cash' in ctx):
-                    if sti_cash_target == "\u2014":
-                        sti_cash_target = val
-                elif 'sti' in ctx and ('max' in ctx or 'maximum' in ctx):
-                    if sti_cash_max == "\u2014":
-                        sti_cash_max = val
-                elif 'lti' in ctx:
-                    if lti_target == "\u2014":
-                        lti_target = val
-    
-    # Populate the table cells
-    # Table 3 structure: Rem Component, Target $m, % of Total, Max. Opp $m, % of Total
-    # Rows 1-5: Fixed, STI-Cash, STI-Equity, LTI, Total
-    if len(table.rows) > 1:
-        table.cell(1, 1).text = fixed_target
-        table.cell(1, 3).text = fixed_target  # Max = Target for fixed pay
-    if len(table.rows) > 2:
-        table.cell(2, 1).text = sti_cash_target
-        table.cell(2, 3).text = sti_cash_max
-    if len(table.rows) > 3:
-        table.cell(3, 1).text = "\u2014"  # STI-Equity - not separately disclosed
-        table.cell(3, 3).text = "\u2014"
-    if len(table.rows) > 4:
-        table.cell(4, 1).text = lti_target
-        table.cell(4, 3).text = "\u2014"  # LTI max = target for performance rights
+        if 'Target and maximum framework' not in line and not ('Fixed pay' in line and 'STI' in line and 'LTI' in line):
+            continue
+        # Classify each dollar amount by the phrase that precedes it, so the
+        # parser tolerates each issuer's wording instead of a single template.
+        for amt in re.finditer(r'\$\s*([\d.,]+)(?:\s*m)?', line):
+            val = _amount(amt.group(0))
+            if val is None:
+                continue
+            ctx = line[max(0, amt.start() - 70): amt.start()].lower()
+            if fixed is None and 'fixed' in ctx:
+                fixed = val
+            elif ('maximum' in ctx or 'maximum' in line.lower()[amt.start() - 70: amt.start()] or 'max' in ctx) and 'profit share' in ctx:
+                if sti_max_total is None:
+                    sti_max_total = val
+            elif 'profit share' in ctx:
+                if sti_total is None:
+                    sti_total = val
+            elif 'sti' in ctx and ('target' in ctx or 'cash' in ctx):
+                if sti_cash is None:
+                    sti_cash = val
+            elif 'lti' in ctx:
+                if lti is None:
+                    lti = val
+
+    # Retained-equity portion = total profit share - cash tranche (ARR p.145
+    # reports "Total available" and "Retained allocation" as the two legs).
+    sti_equity = None
+    if sti_cash is not None and sti_total is not None and sti_total >= sti_cash:
+        sti_equity = sti_total - sti_cash
+
+    # Max opportunities: PSUs are granted at face value with no leverage, so
+    # LTI max == LTI target. Fixed pay does not vary. STI max is split by the
+    # same cash/equity ratio as the target.
+    fixed_max = fixed
+    lti_max = lti
+    sti_cash_max = None
+    sti_equity_max = None
+    if sti_max_total is not None and sti_total and sti_cash is not None:
+        sti_cash_max = sti_max_total * (sti_cash / sti_total)
+        sti_equity_max = sti_max_total * (sti_equity / sti_total)
+
+    targets = [fixed, sti_cash, sti_equity, lti]
+    maxima = [fixed_max, sti_cash_max, sti_equity_max, lti_max]
+
+    def _fmt(v):
+        return f"{v:.2f}" if v is not None else "\u2014"
+
+    def _pct(part, whole):
+        if part is None or whole in (None, 0):
+            return "\u2014"
+        return f"{part / whole * 100:.2f}%"
+
+    total_target = sum(v for v in targets if v is not None) or None
+    total_max = sum(v for v in maxima if v is not None) or None
+
+    # Rows 1-4: Fixed, STI-Cash, STI-Equity, LTI.
+    for i in range(4):
+        if i + 1 < len(table.rows):
+            table.cell(i + 1, 1).text = _fmt(targets[i])
+            table.cell(i + 1, 2).text = _pct(targets[i], total_target)
+            table.cell(i + 1, 3).text = _fmt(maxima[i])
+            table.cell(i + 1, 4).text = _pct(maxima[i], total_max)
+
+    # Row 5: Total.
     if len(table.rows) > 5:
-        if total_target == "\u2014" and (fixed_target != "\u2014" or sti_cash_target != "\u2014" or lti_target != "\u2014"):
-            # Calculate total target if not found
-            parts = [v for v in [fixed_target, sti_cash_target, lti_target] if v != "\u2014"]
-            if parts:
-                total_target = f"{sum(float(p) for p in parts):.3f}"
-        if total_max == "\u2014" and (fixed_target != "\u2014" or sti_cash_max != "\u2014" or lti_target != "\u2014"):
-            # Calculate total max if not found
-            parts = [v for v in [fixed_target, sti_cash_max, lti_target] if v != "\u2014"]
-            if parts:
-                total_max = f"{sum(float(p) for p in parts):.3f}"
-        table.cell(5, 1).text = total_target
-        table.cell(5, 3).text = total_max
+        table.cell(5, 1).text = _fmt(total_target)
+        table.cell(5, 2).text = _pct(total_target, total_target)
+        table.cell(5, 3).text = _fmt(total_max)
+        table.cell(5, 4).text = _pct(total_max, total_max)
 
 
 def _replace_placeholders(doc: docx.Document, replacements: Dict[str, str]) -> None:
