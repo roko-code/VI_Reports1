@@ -19,42 +19,36 @@ Stage-specific variables (used when override not set):
 
 import os
 
-# Global overrides
-_GLOBAL_PRIMARY = os.getenv("LLM_PRIMARY_OVERRIDE")
-_GLOBAL_FALLBACK = os.getenv("LLM_FALLBACK_OVERRIDE")
-
 
 def get_model(stage_primary: str, stage_fallback: str = "") -> tuple[str, str]:
     """
     Get the (primary, fallback) model pair for a stage.
-    
+
     Args:
         stage_primary: Stage-specific primary model env var name
         stage_fallback: Stage-specific fallback model env var name (optional)
-    
+
     Returns:
         Tuple of (primary_model, fallback_model)
+
+    Reads the override lazily (at call time) rather than at import time, so a
+    stage module that calls load_dotenv() after importing this module still sees
+    the override - the previous import-time caching silently ignored it.
     """
-    if _GLOBAL_PRIMARY:
-        primary = _GLOBAL_PRIMARY
-    else:
-        primary = os.getenv(stage_primary, "stealth/ox-alpha")
-    
-    if _GLOBAL_FALLBACK:
-        fallback = _GLOBAL_FALLBACK
-    elif stage_fallback:
+    primary = os.getenv("LLM_PRIMARY_OVERRIDE") or os.getenv(stage_primary, "stealth/ox-alpha")
+
+    fallback = os.getenv("LLM_FALLBACK_OVERRIDE")
+    if not fallback and stage_fallback:
         fallback = os.getenv(stage_fallback, "")
-    else:
+    if fallback is None:
         fallback = ""
-    
+
     return primary, fallback
 
 
 def get_single_model(stage_var: str) -> str:
     """Get single model for stages that only use one model."""
-    if _GLOBAL_PRIMARY:
-        return _GLOBAL_PRIMARY
-    return os.getenv(stage_var, "stealth/ox-alpha")
+    return os.getenv("LLM_PRIMARY_OVERRIDE") or os.getenv(stage_var, "stealth/ox-alpha")
 
 
 # Stage-specific model getters
@@ -92,6 +86,10 @@ def text_summary_models() -> tuple[str, str]:
 
 def board_questions_models() -> tuple[str, str]:
     return get_model("BOARD_QUESTIONS_MODEL", "BOARD_QUESTIONS_FALLBACK_MODEL")
+
+
+def report_rendering_models() -> tuple[str, str]:
+    return get_model("REPORT_RENDERING_MODEL", "REPORT_RENDERING_FALLBACK_MODEL")
 
 
 # Single-model stages

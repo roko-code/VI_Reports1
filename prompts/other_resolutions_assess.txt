@@ -25,6 +25,12 @@ Mandatory (always supplied):
 Optional (supplied only when the orchestrator has sourced them for a specific resolution):
 3. Any resolution-specific document referenced by the NoM but not contained within it or the Annual Report — for example, a Share Purchase Plan offer booklet, a capital-raising prospectus or ASX announcement, the specific proposed constitutional amendment wording (if not reproduced in full in the NoM), or a standalone sustainability/ESG or TCFD report.
 4. A pre-fetched block of news search results covering roughly the past 12 months. Supplementary context only — see "Using the news search results" below.
+5. The current ASA guidelines, loaded from the guidelines folder. AUTHORITATIVE: where any rule code or threshold quoted in this prompt differs from or predates INPUT 5, the document governs. The guidelines are under active review, so follow the supplied document rather than any version quoted here.
+6. A standalone Corporate Governance Statement (CGS), where the company files one separately from the Annual Report.
+7. A prior ASA Voting Intentions report for this company.
+8. A prior ASA AGM/EGM meeting report for this company.
+
+INPUTs 5–8 are always optional; when absent they are omitted and you must not fabricate their contents.
 
 
 USING THE NEWS SEARCH RESULTS (DOCUMENT 4)

@@ -48,6 +48,9 @@ Look for "Underlying Results", "NPAT excluding Notable Items", "Underlying
 Operational Earnings" or equivalent. If genuinely not disclosed for a year, set 
 underlying_npat equal to npat and footnote: "Underlying NPAT not separately 
 disclosed; NPAT (statutory) used."
+If npat is populated for a year, underlying_npat MUST also be populated for
+that year (copy npat when no separate underlying figure exists). A null
+underlying_npat alongside a populated npat is an error, not a valid result.
 
 SHARE PRICE RESTATEMENT
 If prior-year prices are restated to a Theoretical Ex-Rights Price (TERP) 

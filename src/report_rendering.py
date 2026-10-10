@@ -30,6 +30,7 @@ from openai import OpenAI
 import docx
 
 from logging_utils import write_supporting_json, write_supporting_text, TechnicalLogger
+from llm_config import report_rendering_models
 
 load_dotenv(find_dotenv())
 
@@ -37,8 +38,7 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not API_KEY:
     raise ValueError("OPENROUTER_API_KEY not found in .env file.")
 
-REPORT_RENDERING_MODEL = os.getenv("REPORT_RENDERING_MODEL", "openai/gpt-4.1-mini")
-REPORT_RENDERING_FALLBACK_MODEL = os.getenv("REPORT_RENDERING_FALLBACK_MODEL", "google/gemini-3.1-flash-lite")
+REPORT_RENDERING_MODEL, REPORT_RENDERING_FALLBACK_MODEL = report_rendering_models()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = BASE_DIR / "prompts"

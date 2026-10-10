@@ -9,11 +9,12 @@ from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
 
 from logging_utils import write_supporting_json, write_supporting_text
-from currency_anchor import (contains_aud_million, near_miss_currencies,
-                            reporting_currency_for)
+from currency_anchor import (anchored_figures, contains_aud_million,
+                            near_miss_currencies, reporting_currency_for)
 from disclosure_check import disclosed_realised_figures
 from ar_text_cache import get_ar_pages
 from pipeline_db import init_run_db
+from llm_config import performance_models
 
 load_dotenv(find_dotenv())
 
@@ -21,8 +22,7 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not API_KEY:
     raise ValueError("OPENROUTER_API_KEY not found in .env file.")
 
-PERFORMANCE_MODEL = os.getenv("PERFORMANCE_MODEL", "openai/gpt-4.1-mini")
-PERFORMANCE_FALLBACK_MODEL = os.getenv("PERFORMANCE_FALLBACK_MODEL", "google/gemini-3.1-flash-lite")
+PERFORMANCE_MODEL, PERFORMANCE_FALLBACK_MODEL = performance_models()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # JSON Schemas for LLM response validation
@@ -142,28 +142,46 @@ PROMPT_3_SCHEMA = {
     "properties": {
         "ceo_name": {"type": "string"},
         "target_fy": {"type": "string"},
-        "source_method": {"type": "string", "enum": ["disclosed", "calculated"]},
+        "source_method": {"type": "string", "enum": ["disclosed", "calculated", "not_found"]},
+        "basis": {"type": ["string", "null"]},
+        "disclosure_checked": {"type": "boolean"},
+        "disclosed_realised_rem": {"type": ["number", "string", "null"]},
+        "disclosed_realised_source_page": {"type": ["integer", "string", "null"]},
+        "disclosed_realised_quote": {"type": "string"},
+        "ceo_realised_rem": {"type": ["number", "string", "null"]},
+        "ceo_realised_rem_page": {"type": ["integer", "string", "null"]},
+        "currency": {"type": ["string", "null"]},
+        "ceo_realised_rem_aud": {"type": ["number", "string", "null"]},
+        "fx_rate_used": {"type": ["number", "string", "null"]},
+        "fx_rate_source_page": {"type": ["integer", "string", "null"]},
+        "figure_fy": {"type": ["string", "null"]},
+        "not_disclosed_reason": {
+            "type": ["string", "null"],
+            "enum": [None, "no_realised_disclosure", "non_aud_currency", "year_mismatch"]
+        },
+        "ceo_served_part_year": {"type": ["boolean", "null"]},
+        "cross_check_calculated_m": {"type": ["number", "string", "null"]},
+        "cross_check_delta_m": {"type": ["number", "string", "null"]},
+        "cross_check_explained_by": {"type": ["string", "null"]},
+        "cross_check_explanation": {"type": "string"},
+        "cross_check_source_page": {"type": ["integer", "string", "null"]},
+        "lti_status": {"type": ["string", "null"]},
         "cash_non_cash_salary": {"type": ["number", "string", "null"]},
         "cash_source_page": {"type": ["integer", "string", "null"]},
+        "sti_dollars_disclosed": {"type": ["number", "string", "null"]},
+        "sti_source_page": {"type": ["integer", "string", "null"]},
         "sti_max_opportunity": {"type": ["number", "string", "null"]},
         "sti_pct_of_max": {"type": ["number", "string", "null"]},
         "sti_value": {"type": ["number", "string", "null"]},
-        "sti_source_page": {"type": ["integer", "string", "null"]},
         "lti_grant_years_tested": {"type": "array", "items": {"type": ["string", "integer"]}},
         "lti_vesting_pct": {"type": ["number", "string", "null"]},
         "lti_units": {"type": ["number", "string", "null"]},
         "lti_price_used": {"type": ["number", "string", "null"]},
-        "lti_price_basis": {"type": "string", "enum": ["vesting_date", "fy_end"]},
+        "lti_price_basis": {"type": ["string", "null"]},
         "lti_fx_rate_applied": {"type": ["number", "string", "null"]},
         "lti_value": {"type": ["number", "string", "null"]},
         "lti_source_page": {"type": ["integer", "string", "null"]},
-        "ceo_realised_rem": {"type": ["number", "string", "null"]},
-        "ceo_served_part_year": {"type": "boolean"},
-        "not_disclosed_reason": {
-            "type": ["string", "null"],
-            "enum": ["no_realised_disclosure", "year_mismatch", "currency_mismatch",
-                     "table_not_found", "unresolvable_scale"]
-        }
+        "context_notes": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["ceo_name", "target_fy", "source_method", "ceo_realised_rem"]
 }
@@ -673,6 +691,12 @@ def _call_llm(
                 "schema": schema
             }
         }
+    elif schema and _check_response_format_support(model):
+        # Non-strict JSON hint for schemas too complex for strict mode
+        # (prompt_2/prompt_3 use arrays/nested nulls). This makes the provider
+        # force a JSON object so the model cannot fall back to prose - which is
+        # exactly what "LLM returned str, expected JSON object" was.
+        request_kwargs["response_format"] = {"type": "json_object"}
 
     primary_error = None
     for attempt in range(max_retries + 1):
@@ -941,6 +965,41 @@ def _validate_ceo_pay_semantics(data: dict) -> list[str]:
 _RECONCILE_MECHANISMS = ("fx", "deferral_timing", "accounting_basis", "vesting_basis")
 
 
+def _reconcile_ceo_value(result: dict) -> dict:
+    """Repair a scale-slip on the primary realised-pay field using the model's
+    own cross-check.
+
+    The model computes `cross_check_calculated_m` by reconstructing the total
+    from disclosed components, and records it independently of
+    `ceo_realised_rem`. A scale slip (e.g. Macquarie FY2026 `$26,526,819`
+    written as `0.021` instead of `26.53`) leaves the primary field implausibly
+    low while the cross-check is correct. When that happens and the figure is a
+    full-year one, prefer the cross-check - it is the number the model itself
+    derived from the disclosed components and it already passed the page-level
+    currency/scale anchor. Part-year figures are left alone; a part-year total
+    is legitimately small and must not be inflated to a full-year cross-check.
+    """
+    res = dict(result)
+    cross = res.get("cross_check_calculated_m")
+    if cross in (None, ""):
+        return res
+    try:
+        primary = float(res.get("ceo_realised_rem"))
+    except (TypeError, ValueError):
+        return res
+    try:
+        cross = float(cross)
+    except (TypeError, ValueError):
+        return res
+    if bool(res.get("ceo_served_part_year")):
+        return res
+    if primary < 0.8 and cross >= 0.8:
+        res["ceo_realised_rem"] = cross
+        res["disclosed_realised_rem"] = cross
+        res["reconciled_from_cross_check"] = True
+    return res
+
+
 def _make_ceo_pay_validator(pages_by_number: dict, company: str = None):
     """Build a closure that validates a CEO realised-pay claim against pages.
 
@@ -1006,10 +1065,6 @@ def _make_ceo_pay_validator(pages_by_number: dict, company: str = None):
         if page_no is None:
             errors.append("ceo_realised_rem_page required for a disclosed figure")
             return errors
-        page_text = pages_by_number.get(page_no)
-        if page_text is None:
-            errors.append(f"page {page_no} was not supplied")
-            return errors
 
         if not currency:
             errors.append("no currency was declared for the figure")
@@ -1033,24 +1088,45 @@ def _make_ceo_pay_validator(pages_by_number: dict, company: str = None):
             errors.append(f"ceo_realised_rem is not a number: {value_m!r}")
             return errors
 
-        # Currency- and scale-anchored match. A near-miss is reported as a
-        # currency problem ("8.45 is here but it is GBP, not AUD") rather than
-        # as a bare absence, which is what makes the rejection actionable.
-        if contains_aud_million(page_text, value_m, page_no, bare_currency=bare_currency):
-            pass
-        else:
-            near = near_miss_currencies(
-                page_text, value_m, page_no, bare_currency=bare_currency
-            )
+        # Currency- and scale-anchored match, resolved BY VALUE across the
+        # supplied pages rather than by the cited page number. The model is
+        # instructed to cite the PRINTED page number, which (a) can differ from
+        # the PDF index the pages are keyed under and (b) often comes back as a
+        # string. Looking the number up as a key fails on both; scanning for the
+        # value still rejects a wrong figure or a wrong currency.
+        page_texts = [t for t in pages_by_number.values() if t]
+        found = any(
+            contains_aud_million(t, value_m, page_no, bare_currency=bare_currency)
+            for t in page_texts
+        )
+        # A bare figure (no inline $) in an otherwise single-currency table is
+        # the issuer's own currency, e.g. Macquarie's "Total 25,277,224" with no
+        # currency mark. Accept it only when the same value is not ALSO present
+        # in an explicit non-AUD currency; a GBP figure named as AUD still fails.
+        if not found:
+            for t in page_texts:
+                for f in anchored_figures(t, page_no, bare_currency=bare_currency):
+                    if (f.value_m is not None and abs(f.value_m - value_m) <= 0.011
+                            and f.currency is None):
+                        found = True
+                        break
+                if found:
+                    break
+        if not found:
+            near = []
+            for t in page_texts:
+                near.extend(
+                    near_miss_currencies(t, value_m, page_no, bare_currency=bare_currency)
+                )
             if near:
                 cur = ",".join(sorted({f.currency for f in near if f.currency}))
                 errors.append(
-                    f"currency_mismatch: {value_m}m found on page {page_no} but in "
+                    f"currency_mismatch: {value_m}m is in the supplied pages but as "
                     f"{cur}, not AUD"
                 )
             else:
                 errors.append(
-                    f"value_not_found: {value_m}m not found on page {page_no}"
+                    f"value_not_found: {value_m}m not found in the supplied pages"
                 )
 
         if value_m < 0.8 and not data.get("ceo_served_part_year"):
@@ -1215,7 +1291,11 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
     # completed checkpoint instead of redoing work. The wrapper is local to
     # this function, so every call site below picks it up unchanged.
     if supporting_data_dir is not None:
-        db, run_id = init_run_db(supporting_data_dir)
+        # run_id is deterministic (the workspace name, e.g. "SUN_2026") so a
+        # re-run resumes completed checkpoints instead of starting fresh. A
+        # fresh uuid per invocation would defeat the whole point of resuming
+        # after a rate-limit interruption.
+        db, run_id = init_run_db(supporting_data_dir, run_id=workspace_dir.name)
         years = list(range(latest_year - 4, latest_year + 1))
         db.init_checkpoints(
             run_id,
@@ -1546,6 +1626,13 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
             validator = _make_ceo_pay_validator(pages_by_number, ticker)
             claim = dict(result_3)
             claim.setdefault("target_fy", str(yr))
+            # Repair a scale-slip before validation: when the model recorded an
+            # implausibly low primary figure but its own component cross-check
+            # came back plausible, adopt the cross-check (it is the number the
+            # model derived from the disclosed components). See
+            # docs/validator_traps.md and tests/test_measured_defects.py for why
+            # the primary field cannot be trusted when the two disagree.
+            claim = _reconcile_ceo_value(claim)
             v_errors = validator(claim)
             if v_errors:
                 if logger:
@@ -1559,8 +1646,8 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
                 )
                 continue
 
-            if result_3.get("ceo_realised_rem") is not None:
-                ceo_rem = result_3["ceo_realised_rem"]
+            if claim.get("ceo_realised_rem") is not None:
+                ceo_rem = claim["ceo_realised_rem"]
                 # Safety check: if value > 1000000, it's likely in raw dollars
                 # If value > 1000 and <= 1000000, it's likely in thousands
                 # CEO pay in $millions should typically be < 1000 (i.e., < $1B)
@@ -1576,10 +1663,17 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
                 
                 compiled["ceo_realised_pay"][yr_str] = {
                     "value_m": ceo_rem,
-                    "source_method": result_3.get("source_method", "calculated"),
-                    "source_page": result_3.get("sti_source_page", "") or result_3.get("lti_source_page", ""),
-                    "notes": f"CEO: {result_3.get('ceo_name', 'Unknown')}"
+                    "source_method": claim.get("source_method", "calculated"),
+                    "source_page": claim.get("sti_source_page", "") or claim.get("lti_source_page", ""),
+                    "notes": f"CEO: {claim.get('ceo_name', 'Unknown')}"
                 }
+                if claim.get("reconciled_from_cross_check"):
+                    compiled["ceo_realised_pay"][yr_str]["notes"] += " (reconciled from cross-check)"
+                    if logger:
+                        logger.warning(
+                            f"Prompt 3: FY{yr} primary figure was implausibly low; "
+                            f"reconciled to cross-check value ${ceo_rem:.2f}m"
+                        )
                 prompt_3_success = True
                 if logger:
                     logger.info(f"Prompt 3: FY{yr} CEO realised pay = ${ceo_rem:.2f}m")
@@ -1618,6 +1712,46 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
             logger.error(f"Prompt 4 failed: {e}")
     
     t0 = time.time()
+    # Backfill share_price + simple_tsr from Yahoo's public chart endpoint.
+    # Many ARs (Macquarie is the clear case) publish no multi-year share-price
+    # history, so these two metrics are genuinely not extractable from the AR.
+    # Historical FY-end closes are deterministic market facts, cached per ticker.
+    try:
+        from share_prices import (compute_simple_tsr, detect_fy_end_month_day,
+                                  get_fy_closes, yahoo_symbol)
+
+        cover_text = ""
+        for p in latest_ar_pages[:3]:
+            cover_text += (p.get("text") or "") + "\n"
+        fy_end = detect_fy_end_month_day(cover_text)
+        if fy_end is not None:
+            month, day = fy_end
+            years_desc = sorted(int(y) for y in compiled.get("years", {}).keys())
+            closes = get_fy_closes(ticker, month, day, years_desc)
+            tsr_by_year = compute_simple_tsr(closes)
+            for y in years_desc:
+                y_str = str(y)
+                yd = compiled["years"].get(y_str)
+                if not isinstance(yd, dict):
+                    continue
+                yd.setdefault("missing_metrics", [])
+                if yd.get("share_price") in (None, "") and closes.get(y) is not None:
+                    yd["share_price"] = round(closes[y], 2)
+                    if "share_price" in yd["missing_metrics"]:
+                        yd["missing_metrics"].remove("share_price")
+                if yd.get("simple_tsr") in (None, "") and tsr_by_year.get(y) is not None:
+                    yd["simple_tsr"] = tsr_by_year[y]
+                    if "simple_tsr" in yd["missing_metrics"]:
+                        yd["missing_metrics"].remove("simple_tsr")
+            if logger:
+                logger.info(
+                    "Share-price backfill: %d years from %s (FY-end %02d/%02d)",
+                    len(years_desc), yahoo_symbol(ticker), month, day,
+                )
+    except Exception as e:
+        if logger:
+            logger.warning(f"Share-price backfill could not run: {e}")
+
     # Save compiled JSON
     compiled_path = workspace_dir / "extracted_json" / "performance_history_5yr.json"
     compiled_path.parent.mkdir(parents=True, exist_ok=True)

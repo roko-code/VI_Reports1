@@ -86,11 +86,13 @@ check("audit counts only 1 VIR (not 3 with AGM/EGM)",
        vi_issue is not None and "1/" in vi_issue.get("detail", ""),
        f"detail={vi_issue}")
 
-# Stage 9 doc-6 availability: AGM-only workspace (no VIR) -> "Not available".
-with open(ROOT / "src" / "board_questions.py", "r", encoding="utf-8") as fh:
-    bq_src = fh.read()
-check("board_questions doc-6 glob is *_VIR.pdf",
-       'vi_dir.glob("*_VIR.pdf")' in bq_src)
+# Stage 9 doc-6 availability now comes from input_sources.load_latest_vi_text,
+# which globs only *_VIR.pdf (AGM/EGM are excluded by construction). Guard the
+# glob pattern at its new home; the available-branch still only fires on a VIR.
+with open(ROOT / "src" / "input_sources.py", "r", encoding="utf-8") as fh:
+    isrc = fh.read()
+check("VI loader globs only *_VIR.pdf (AGM/EGM excluded)",
+      'list(vi_dir.glob("*_VIR.pdf"))' in isrc)
 # Functional check: the doc-6 branch only appends "available" when *_VIR.pdf
 # exists. A workspace with only AGM must hit the "Not available" branch.
 (ws2b := tmp2 / "ZZZ_2026_AGM_ONLY").mkdir()

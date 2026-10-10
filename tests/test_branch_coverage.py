@@ -133,6 +133,29 @@ check("prompt no longer offers part_year_ceo as a not_disclosed reason",
 
 print()
 print("=" * 90)
+print("5. schema must accept the normal disclosed answer (null reason/flag)")
+print("=" * 90)
+import jsonschema  # noqa: E402
+ndr = props["not_disclosed_reason"]
+check("not_disclosed_reason enum allows null",
+      None in ndr["enum"], str(ndr["enum"]))
+check("not_disclosed_reason enum matches the prompt's three reasons",
+      sorted(x for x in ndr["enum"] if x) == ["no_realised_disclosure", "non_aud_currency", "year_mismatch"],
+      str(ndr["enum"]))
+check("ceo_served_part_year accepts null",
+      "null" in props["ceo_served_part_year"]["type"],
+      str(props["ceo_served_part_year"]["type"]))
+disclosed_answer = {"ceo_name": "X", "target_fy": "2026", "source_method": "disclosed",
+                    "ceo_realised_rem": 6.63, "ceo_served_part_year": None,
+                    "not_disclosed_reason": None}
+try:
+    jsonschema.validate(disclosed_answer, pt.PROMPT_3_SCHEMA)
+    check("a disclosed answer with null reason/flag validates", True, "")
+except Exception as e:
+    check("a disclosed answer with null reason/flag validates", False, str(e)[:200])
+
+print()
+print("=" * 90)
 if failures:
     print(f"{len(failures)} FAILED: {failures}")
     sys.exit(1)

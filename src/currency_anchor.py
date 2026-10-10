@@ -58,8 +58,8 @@ _NUMBER_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\d+")
 
 _SCALE_PATTERNS = [
     (r"[\u2018\u2019']?\s?000", "thousand"),
-    (r"\bbn\b|\bbillion\b", "bn"),
-    (r"\bm\b|\bmillion\b", "m"),
+    (r"[$\u00a3\u20ac\uffe5]\s*bn\b|\(\s*bn\s*\)", "bn"),
+    (r"[$\u00a3\u20ac\uffe5]\s*m\b|\(\s*m\s*\)", "m"),
 ]
 _SCALE_FACTORS = {"units": 1, "thousand": 1_000, "m": 1_000_000,
                  "bn": 1_000_000_000}
@@ -352,7 +352,15 @@ def reporting_currency_for(company: str,
     accept any figure, which still requires a declared scale and an AUD anchor
     for an AUD claim.
     """
-    path = Path(comparator_path) if comparator_path else DEFAULT_COMPARATOR
+    if comparator_path is None:
+        try:
+            from input_sources import find_comparator_csv
+            resolved = find_comparator_csv()
+        except Exception:
+            resolved = None
+        path = resolved or DEFAULT_COMPARATOR
+    else:
+        path = Path(comparator_path)
     try:
         with path.open(encoding="utf-8-sig") as fh:
             for row in csv.DictReader(fh):

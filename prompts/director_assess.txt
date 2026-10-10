@@ -12,8 +12,13 @@ Your objective is to conduct a multi-layered, board-ready evaluation of each nom
 [INPUT CONTRACT]
 - AGM Details JSON: [Provided]
 - Annual Report Text: [Provided]
-- ASA Guidelines Text: [Provided]
+- ASA Guidelines Text: [Provided - the latest guidelines loaded from the guidelines folder; authoritative, may be updated]
 - News Search Results (pre-fetched, ~12 months): [Provided - see INPUT 4 when present / Not available]
+- Corporate Governance Statement (standalone CGS): [Provided as INPUT 5 when present / not available]
+- Prior ASA Voting Intentions report: [Provided as INPUT 6 when present / not available - use for "Prior Performance": prior ASA 'Against'/'For' recommendations and concerns about a candidate]
+- Prior ASA AGM/EGM meeting report: [Provided as INPUT 7 when present / not available]
+
+All INPUT 5/6/7 documents are optional. When absent, do not fabricate their contents; state that they were not supplied and proceed on the internal evidence.
 
 ---
 

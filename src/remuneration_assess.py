@@ -21,6 +21,7 @@ from logging_utils import write_supporting_json, write_supporting_text, Technica
 from ar_text_cache import get_ar_pages
 from ar_retrieval import STAGE5_SPECS, build_context, write_manifest
 from citation_check import check_citations, format_problems
+from disclosure_check import check_disclosed_realised
 from news_search_results import load_news_block, has_news_results
 from ar_file_lookup import find_ar_file as _find_ar_file_lookup
 from llm_config import rem_assess_models
@@ -84,12 +85,16 @@ def _load_prompt(filename: str) -> str:
 
 
 def _load_comparator_csv() -> List[Dict[str, Any]]:
-    """Load comparator CSV and filter to CEO rows with latest year per company."""
-    if not COMPARATOR_CSV_PATH.exists():
+    """Load comparator CSV (folder-driven) and filter to CEO rows with the
+    latest year per company."""
+    from input_sources import find_comparator_csv
+
+    path = find_comparator_csv()
+    if path is None:
         return []
 
     rows = []
-    with open(COMPARATOR_CSV_PATH, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
             if row.get("Csuite Job Title", "").lower() == "chief executive officer":
@@ -475,14 +480,31 @@ def run_remuneration_assessment(
     logger.info(f"AR path: {ar_path}")
     logger.info(f"Prior AR path: {prior_ar_path}")
 
+    # Folder-driven supplementary sources (2026-10-10): the standalone CGS, the
+    # prior ASA VI/AGM report, and the latest ASA guidelines are loaded from
+    # their folders, not from prompt-embedded text, so updating a file in the
+    # folder is enough to change what is assessed. Loaded before the document
+    # inventory so docs_supplied can report their availability.
+    from input_sources import (
+        load_asa_guidelines, load_cgs_text, load_latest_meeting_text,
+        load_latest_vi_text,
+    )
+    cgs_text = load_cgs_text(workspace_dir)
+    prior_vi_text = load_latest_vi_text(workspace_dir)
+    prior_meeting_text = load_latest_meeting_text(workspace_dir)
+    asa_guidelines_text = load_asa_guidelines()
+
     # Document inventory
+    from input_sources import find_comparator_csv as _find_comp
     docs_supplied = {
         "current_ar": ar_path is not None,
         "nom": nom_path is not None,
         "prior_ar": prior_ar_path is not None,
-        "prior_asa_report": False,
+        "prior_asa_report": bool(prior_vi_text or prior_meeting_text),
+        "cgs": bool(cgs_text),
+        "asa_guidelines": bool(asa_guidelines_text),
         "peer_reports": False,
-        "comparator_csv": COMPARATOR_CSV_PATH.exists(),
+        "comparator_csv": _find_comp() is not None,
     }
     logger.info(f"Documents supplied: {docs_supplied}")
 
@@ -558,6 +580,15 @@ def run_remuneration_assessment(
     if logger:
         logger.info(f"News block: {'present' if has_news_results(workspace_dir) else 'not available'}")
 
+    if logger:
+        logger.info(
+            "Supplementary sources: "
+            f"cgs={'present' if cgs_text else 'absent'}, "
+            f"prior_vi={'present' if prior_vi_text else 'absent'}, "
+            f"prior_agm={'present' if prior_meeting_text else 'absent'}, "
+            f"asa_guidelines={len(asa_guidelines_text)} chars"
+        )
+
     # Load prompt
     prompt_text = _load_prompt("rem_assess.txt")
 
@@ -571,6 +602,17 @@ def run_remuneration_assessment(
     prior_ar_text_trunc = prior_ar_text if prior_ar_text else "NOT SUPPLIED"
     coverage_note = ar_retrieval.coverage_note() if ar_retrieval else "NOT SUPPLIED"
 
+    prior_asa_block = "NOT SUPPLIED"
+    if prior_vi_text or prior_meeting_text:
+        prior_asa_block = ""
+        if prior_vi_text:
+            prior_asa_block += "--- Prior ASA Voting Intentions report ---\n" + prior_vi_text + "\n\n"
+        if prior_meeting_text:
+            prior_asa_block += "--- Prior ASA AGM/EGM meeting report ---\n" + prior_meeting_text + "\n\n"
+
+    cgs_trunc = cgs_text if cgs_text else "NOT SUPPLIED"
+    asa_trunc = asa_guidelines_text if asa_guidelines_text else "NOT SUPPLIED"
+
     user_content = f"""
 COMPANY: {ticker}
 FINANCIAL_YEAR: {year}
@@ -583,14 +625,23 @@ FINANCIAL_YEAR: {year}
 === DOCUMENT 2: NOTICE OF MEETING ===
 {nom_text_trunc}
 
-=== DOCUMENT 3: PRIOR YEAR ANNUAL REPORT (if available) ===
+=== DOCUMENT 4: PRIOR YEAR ANNUAL REPORT (if available) ===
 {prior_ar_text_trunc}
+
+=== DOCUMENT 5: PRIOR ASA VOTING INTENTIONS / AGM REPORT (if available) ===
+{prior_asa_block}
 
 === DOCUMENT 7: COMPARATOR CSV (CEO/KMP data) ===
 Available companies: {len(comparator_data)} CEO rows
 
 === DOCUMENT 8: NEWS SEARCH RESULTS (pre-fetched, ~12 months) ===
 {news_block}
+
+=== DOCUMENT 9: ASA GUIDELINES (latest, loaded from the guidelines folder) ===
+{asa_trunc}
+
+=== DOCUMENT 10: CORPORATE GOVERNANCE STATEMENT (standalone CGS, if available) ===
+{cgs_trunc}
 """
 
     # Call LLM for assessment (expecting Markdown output, not JSON)
@@ -653,6 +704,23 @@ Available companies: {len(comparator_data)} CEO rows
             logger.info(f"Stage 5 citation check: {rep.summary()}")
     except Exception as e:                      # never fail the stage on this
         logger.warning(f"Stage 5 citation check could not run: {e}")
+
+    # Realised-remuneration disclosure check. The worst failure mode is a false
+    # `not_disclosed` terminal answer: if the retrieved pages carry a CEO realised
+    # row but the model says realised pay is not disclosed, surface it. Logged,
+    # not enforced, so it never blocks a run; a human reviewer sees the warning.
+    try:
+        if ar_retrieval is not None:
+            supplied_numbers = set(ar_retrieval.included_pages)
+            supplied_pages = {
+                p.get("page_number"): (p.get("text") or "")
+                for p in ar_pages
+                if p.get("page_number") in supplied_numbers
+            }
+            for problem in check_disclosed_realised(llm_output, supplied_pages):
+                logger.warning(f"Stage 5 disclosure check: {problem}")
+    except Exception as e:                      # never fail the stage on this
+        logger.warning(f"Stage 5 disclosure check could not run: {e}")
 
     logger.stage_end("Stage 5: Remuneration Assessment", True)
     return True

@@ -21,3 +21,11 @@ data/
 tests/TestAPIKey
 tests/TestRun1
 tests/__pycache__/
+
+# Local run artifacts and ad-hoc LLM probe output (not source).
+technical_log.md
+src/technical_log.md
+src/test_results_*.json
+
+# Kilo runtime state (agent-manager sessions, worktrees, plans).
+.kilo/

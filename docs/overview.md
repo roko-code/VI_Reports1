@@ -478,3 +478,20 @@ All outputs       ──▶ Stage 10 ──▶ {TICKER}_{YEAR}_VI_Report.docx
   `overall_assessment != "FAIL"`. The gate is now `_audit_passes()`
   (stage7_audit.py:310), matching the remediation loop's own stop condition;
   pinned by `tests/test_audit_gate.py`.
+- **Chunk 5 alignment (2026-10-10)** — the MQG gold-set comparison exposed a
+  reasoning-frame gap: the model voted FOR Resolutions 3 and 4 while the human
+  voted AGAINST both, because the model ran REM-M01..REM-S13 as a
+  disclosure-completeness checklist and never weighed structural design quality
+  (the 84:12 STI:LTI mix was never evaluated; `mix` appears in
+  `rem_assess.txt` only in a multi-currency context). Two prompt-level fixes:
+  (1) new **REM-S14 — Pay mix and incentive structure**, with a ~one-third LTI
+  reference band, a STI/LTI distinguishability test, and a discretion test that
+  feeds off REM-S11; plus a new Section 4 row 8 that forces the mix to be
+  calculated from the disclosed target figures rather than inferred from the
+  statutory table or a chart. (2) a **Resolution 4 linkage rule** stating that a
+  single secondary guideline failure is not enough to recommend Against — only
+  a major guideline failure, a pattern of secondary failures, or an open
+  REM-M03 — and requiring an explicit overall recommendation line
+  (For/Against/Abstain) naming the decisive rows. The output format gained an
+  item 8 for that line. Regression: `tests/test_chunk5_alignment.py` (22
+  assertions); all 13 existing suites and the retrieval self-test still pass.

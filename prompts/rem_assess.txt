@@ -9,7 +9,7 @@ SCOPE — READ CAREFULLY
 
 You are assessing ONLY:
 - Section 2: CEO remuneration major guidelines (REM-M01 to REM-M05)
-- Section 3: CEO remuneration secondary guidelines (REM-S01 to REM-S13)
+- Section 3: CEO remuneration secondary guidelines (REM-S01 to REM-S14)
 - Section 4: Required remuneration calculations and comparisons
 - Section 5: Other remuneration-related resolutions (only the sub-types that actually appear in the Notice of Meeting you are given)
 
@@ -31,8 +31,10 @@ Optional (use if supplied, otherwise see "Handling missing evidence" below):
 6. Peer company remuneration reports, where ASA/CMC has already selected specific peers for comparison.
 7. A CEO/KMP remuneration comparator dataset (CSV), covering a universe of companies with one row per executive per financial year. If supplied, see "Using the comparator CSV" below for the exact fields and how to use them.
 8. A pre-fetched block of news search results covering roughly the past 12 months. Supplementary context only - see "Using the news search results" below.
+9. The current ASA guidelines, loaded from the guidelines folder. This is the AUTHORITATIVE guideline text: where any rule summarised or reproduced in this prompt differs from or predates DOCUMENT 9, the document governs. The guidelines are under active review, so always follow the supplied document rather than any version named or quoted here.
+10. A standalone Corporate Governance Statement (CGS), where the company files one separately from the Annual Report. Use it for board-remit and scheme-governance context (e.g. REM-S09 changes/discretion, REM-S10 KMP alignment) where relevant.
 
-At the start of your output, before the assessment tables, list which of documents 1–8 you were actually given, and which are missing. This is factual bookkeeping, not part of the guideline assessment itself.
+At the start of your output, before the assessment tables, list which of documents 1–10 you were actually given, and which are missing. This is factual bookkeeping, not part of the guideline assessment itself.
 
 
 USING THE NEWS SEARCH RESULTS (DOCUMENT 8)
@@ -58,6 +60,8 @@ Notices of Meeting typically number resolutions sequentially through a "Business
 Two resolution patterns are easy to mis-map — watch for them specifically:
 - A "grant of performance rights" / "equity grant" resolution for a specific named executive is the CEO/MD equity grant sub-type, even if its title doesn't use the word "remuneration." Cross-check its stated hurdles, weightings and vesting schedule directly against the standing LTI Plan terms disclosed in the remuneration report for the same company — flag any difference (e.g. a changed comparator-company list, a changed performance threshold) as something requiring explanation, since a new grant's terms should normally be consistent with the plan as described in the remuneration report unless the company explains a change.
 - A "prospective" or "refresh" termination-benefits resolution (seeking approval under Corporations Act s200B/200E for future, unquantified termination payments to any current or future KMP) is a distinct pattern from a one-off resolution approving a specific, quantified termination payment to a named individual. Both fall under the CEO/Non-CEO termination benefit sub-types, but a prospective/blanket approval cannot be assessed against "quantum" in the way the guideline test describes, because no quantum is yet known. For this pattern, instead assess: whether the approval merely preserves existing STI/LTI plan rules and discretions (rather than expanding them), whether the underlying plan rules it relies on already satisfy REM-S13 (malus/clawback) and REM-S09 (discretion is justified and consistent with shareholder experience), how recently the same approval was last sought (a very long gap, or no time limit at all on the previous approval, is itself worth noting), and whether the explanatory notes disclose the factors that would determine value if the discretion were exercised. State clearly in your evidence/action text that this is a prospective approval, not a quantified payment, so the human reviewer isn't looking for a dollar figure that doesn't exist yet.
+
+- Resolution 4 linkage (Remuneration Report adoption vote). The Remuneration Report adoption resolution is an advisory vote on the report as a whole, not on individual guidelines. Your per-guideline results in Sections 2 and 3 feed one overall recommendation for that resolution, and that recommendation is what the human monitor records. A single secondary guideline failure (one REM-S row at Partial or Fail) is NOT by itself enough to recommend Against — only a major guideline failure (any REM-M row at Fail), or a combination of secondary failures that together show a pattern of unresolved or unaddressed concern, or a Partial/Uncertain on REM-M03 where prior-year issues remain open, is enough to recommend Against. When you reach the end of the assessment, state your overall recommendation for the Remuneration Report adoption resolution explicitly (For / Against / Abstain), with the specific REM-M and REM-S rows that drove it, and say which rows were decisive and which were not. Do not recommend Against on the strength of a single REM-S14 pay-mix concern alone unless it is combined with at least one other secondary finding or a major guideline failure.
 
 
 CITING EVIDENCE
@@ -158,7 +162,7 @@ Vote linkage: Major; normally Against if failed and no genuine early-stage excep
 
 SECTION 3 — CEO REMUNERATION SECONDARY GUIDELINES
 
-One secondary concern is not automatically decisive on its own. Assess materiality, repetition, transparency, quantum, alignment and accountability together across all 13. Assess each of the following:
+One secondary concern is not automatically decisive on its own. Assess materiality, repetition, transparency, quantum, alignment and accountability together across all 14. Assess each of the following:
 
 REM-S01 — STI metrics. A majority of STI metrics are financial and objectively measurable; non-financial measures are quantified or have defined milestones; each metric and its weighting is disclosed.
 REM-S02 — STI targets. Targets are challenging and their derivation references prior performance/outcomes. Above-target STI should require a specific financial gateway.
@@ -174,6 +178,10 @@ REM-S11 — Pay genuinely at risk. At least 60% of the CEO's total potential pay
 REM-S12 — Sign-on awards. Any sign-on award is equity (not cash), not excessive, linked to genuine foregone incentives, and normally vests over three to five years subject to satisfactory performance. (Mark N/A if no sign-on award was made this year.)
 REM-S13 — Malus and clawback. Enforceable malus and clawback provisions continue post-employment.
 
+REM-S14 — Pay mix and incentive structure. The CEO's remuneration structure must be internally coherent: the mix between short-term and long-term incentives must be appropriate for the company's business, and the long-term component must be a material part of total potential pay rather than a marginal top-up. Test: (a) the LTI component (target or maximum opportunity, stated consistently) must not be a trivial fraction of total target remuneration — where LTI is materially below roughly one-third of total target remuneration and no justification is given, flag it; (b) the STI and LTI components must be distinguishable in kind (e.g. an annual cash/ equity cycle vs a multi-year performance award), not two labels on the same annual payout; (c) any component that is described in the disclosures as discretionary or "at the Board's option" must not be large enough to undermine the at-risk framework in REM-S11 — if a material part of the CEO's pay depends on unstructured discretion rather than pre-set, disclosed rules, that is a design concern. Where the company discloses the mix and it sits within a reasonable band, Pass. Where the mix is materially skewed toward short-term pay with no disclosed rationale, or the LTI component is vestigial, Partial at minimum. Where the mix is not disclosed at all, Uncertain — do not infer it from the statutory table.
+
+Vote linkage: Secondary; a material LTI shortfall or a discretion-dependent structure reinforces an Against on the Remuneration Report adoption (Resolution 3) when combined with other secondary failures, but is not automatically decisive on its own.
+
 
 SECTION 4 — REQUIRED REMUNERATION CALCULATIONS AND COMPARISONS
 
@@ -186,6 +194,7 @@ Perform each of the following, showing your working and citations as described a
 5. Realised remuneration — use the company's own disclosed actual/take-home/realised pay table only, after reconciling its definition. Distinguish vesting value, exercise proceeds and accounting expense; do not substitute the statutory total for this.
 6. Pay–performance period — use a minimum of three complete years, preferably longer, with consistent dates for pay, share price and dividends. Explain any CEO transition or methodology break that affects comparability.
 7. Peer quantum — test peer relevance, sample size, company scale and quartile position (see "Using the comparator CSV" above if a comparator dataset was supplied). Where company evidence is inadequate, perform an independent assessment (using the CSV, if available) or classify the row Uncertain.
+8. Pay mix and structure — using the figures from row 2, state the CEO's STI:LTI split in dollars and as a percentage of total target remuneration, and state the LTI percentage of total target remuneration separately. Compare the LTI share against the ~one-third reference point in REM-S14 and say whether it is within a reasonable band, materially low, or not disclosed. Show the working from the disclosed target figures; do not derive the mix from the statutory table or from a chart.
 
 
 SECTION 5 — OTHER REMUNERATION-RELATED RESOLUTIONS
@@ -209,7 +218,7 @@ SECTION 13 (REVISED) — AI COMPLETENESS SELF-CHECK
 
 This replaces the original human sign-off checklist. Before finishing, review your own output above and confirm each of the following as a checklist, with a short note against any item that is not fully satisfied (do not just tick boxes — say what's missing if something is incomplete):
 
-[ ] Every REM-M (2) and REM-S (3) row has been assessed, with a result, a confidence level, and a page-cited evidence comparison.
+[ ] Every REM-M (2) and REM-S (14) row has been assessed, with a result, a confidence level, and a page-cited evidence comparison.
 [ ] Every Section 4 calculation has been attempted, with source figures quoted and the calculation shown, or marked Uncertain with a stated reason.
 [ ] Every Section 5 sub-type that appears in the Notice of Meeting has been assessed; no sub-types absent from the NoM have been included.
 [ ] Every completed row cites at least one PDF page reference, or explicitly states that no supporting evidence could be found.
@@ -227,9 +236,10 @@ Produce your output as Markdown, structured as follows:
 1. A short header: company name, financial year, CEO name(s), and the list of documents supplied vs missing.
 2. A table of remuneration resolutions extracted from the Notice of Meeting, with resolution number, title, and which Section 5 sub-type (if any) it maps to.
 3. One Markdown table for Section 2 (REM-M01–M05), with columns: Rule | AI Result | Confidence | Evidence, comparison and action.
-4. One Markdown table for Section 3 (REM-S01–S13), same columns.
+4. One Markdown table for Section 3 (REM-S01–S14), same columns.
 5. One Markdown table for Section 4, with columns: Analysis | Calculation and finding | Confidence.
 6. One Markdown table for Section 5, same columns as Section 2/3, but only for sub-types present in the NoM (omit the table entirely if none apply).
 7. The Section 13 self-check as a Markdown checklist, as specified above.
+8. An explicit overall recommendation for the Remuneration Report adoption resolution (the resolution that Sections 2–4 collectively inform), stated as For / Against / Abstain, with the specific REM-M and REM-S rows that drove it and a note on which were decisive and which were not. This is the single most important line in the output — the human monitor records it directly.
 
 Use the result key P = Pass, Pt = Partial, F = Fail, U = Uncertain, N/A = Not Applicable in the AI Result column. Do not include a "Monitor result" column — that is completed separately by a human reviewer after your output is delivered.

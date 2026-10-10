@@ -345,6 +345,30 @@ def _build_summary_payload(
     parts.append(news_block)
     parts.append(f"\n--- End News Search Results Block ---\n")
 
+    # 7-9. Folder-driven reference sources (2026-10-10): latest ASA guidelines,
+    # standalone CGS, and prior ASA VI/AGM report. Reference context only;
+    # truncated to keep the summary prompt bounded.
+    from input_sources import (
+        load_asa_guidelines, load_cgs_text, load_latest_meeting_text,
+        load_latest_vi_text,
+    )
+    asa_text = load_asa_guidelines()
+    cgs_text = load_cgs_text(workspace_dir)
+    prior_vi_text = load_latest_vi_text(workspace_dir)
+    prior_meeting_text = load_latest_meeting_text(workspace_dir)
+
+    parts.append("\n## ASA Guidelines (latest, reference)\n")
+    parts.append(asa_text[:8000] if asa_text else "*Not available*")
+    if cgs_text:
+        parts.append("\n## Corporate Governance Statement (standalone CGS)\n")
+        parts.append(cgs_text[:8000])
+    if prior_vi_text:
+        parts.append("\n## Prior ASA Voting Intentions Report\n")
+        parts.append(prior_vi_text[:5000])
+    if prior_meeting_text:
+        parts.append("\n## Prior ASA AGM/EGM Meeting Report\n")
+        parts.append(prior_meeting_text[:3000])
+
     return "\n".join(parts)
 
 

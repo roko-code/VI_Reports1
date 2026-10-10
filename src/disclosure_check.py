@@ -121,3 +121,43 @@ def disclosed_realised_figures(pages_by_number: dict) -> list[DisclosedRow]:
     for page_no in sorted(pages_by_number):
         out.extend(disclosed_ceo_rows(pages_by_number[page_no], page_no))
     return out
+
+
+# A claim that realised/take-home remuneration is absent. This is only ever
+# acted on when disclosed_realised_figures has already found a CEO realised row
+# on a supplied page, so a loose pattern cannot produce a false positive on its
+# own: both halves of the check must fire together.
+NON_DISCLOSURE_PAT = re.compile(
+    r"not\s+disclosed"
+    r"|no\s+realis[ez]d\s+remuneration"
+    r"|realis[ez]d\s+remuneration[^.\n]{0,8}?(?:not\s+(?:available|disclosed|provided|reported|found)|absent)"
+    r"|does\s+not\s+disclose[^.\n]{0,80}?realis[ez]d"
+    r"|no\s+(?:actual|take[- ]?home)[^.\n]{0,30}?remuneration",
+    re.IGNORECASE,
+)
+
+
+def check_disclosed_realised(output_text: str, pages_by_number: dict) -> list[str]:
+    """Flag an output that claims realised remuneration is not disclosed even
+    though the supplied pages carry a CEO realised-remuneration row.
+
+    This is the `not_disclosed` escape hatch at the prose level. NAB FY2024
+    p.145 publishes a realised CEO row; a model that answers "no realised
+    disclosure" while that page is in the retrieved slice is producing a false
+    negative, and it must be surfaced rather than silently trusted. Returns a
+    list of human-readable problems (empty when nothing is wrong).
+    """
+    if not output_text or not NON_DISCLOSURE_PAT.search(output_text):
+        return []
+    disclosed = disclosed_realised_figures(pages_by_number)
+    if not disclosed:
+        return []
+    problems: list[str] = []
+    for row in disclosed:
+        pg = f"p.{row.page}" if row.page is not None else "a supplied page"
+        part = " (part-year CEO)" if row.part_year else ""
+        problems.append(
+            f"output claims realised remuneration is not disclosed, but {pg} "
+            f"discloses a CEO realised row{part}: {row.text[:120]!r}"
+        )
+    return problems

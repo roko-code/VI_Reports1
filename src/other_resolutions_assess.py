@@ -578,6 +578,18 @@ def run_other_resolutions_assessment(
     if logger:
         logger.info(f"Stage 7 news context: {'supplied' if news_block.strip() else 'not available'}")
 
+    # Folder-driven supplementary sources (2026-10-10): standalone CGS, prior
+    # ASA VI/AGM report, and the latest ASA guidelines. Loaded from folders so
+    # updating a file there is enough to change what is assessed.
+    from input_sources import (
+        load_asa_guidelines, load_cgs_text, load_latest_meeting_text,
+        load_latest_vi_text,
+    )
+    cgs_text = load_cgs_text(workspace_dir)
+    prior_vi_text = load_latest_vi_text(workspace_dir)
+    prior_meeting_text = load_latest_meeting_text(workspace_dir)
+    asa_guidelines_text = load_asa_guidelines()
+
     # Load prompt
     prompt_text = _load_prompt("other_resolutions_assess.txt")
 
@@ -596,6 +608,18 @@ FINANCIAL_YEAR: {year}
 
 === DOCUMENT 4: NEWS SEARCH RESULTS (pre-fetched, ~12 months) ===
 {news_block}
+
+=== INPUT 5: ASA GUIDELINES (latest, from the guidelines folder) ===
+{asa_guidelines_text}
+
+=== INPUT 6: CORPORATE GOVERNANCE STATEMENT (standalone CGS, if available) ===
+{cgs_text if cgs_text else "*Not available*"}
+
+=== INPUT 7: PRIOR ASA VOTING INTENTIONS REPORT (if available) ===
+{prior_vi_text if prior_vi_text else "*Not available*"}
+
+=== INPUT 8: PRIOR ASA AGM/EGM MEETING REPORT (if available) ===
+{prior_meeting_text if prior_meeting_text else "*Not available*"}
 """
 
     client = OpenAI(

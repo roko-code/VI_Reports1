@@ -328,9 +328,24 @@ def _build_board_questions_payload(
     else:
         parts.append("=== DOCUMENT 1: Current Annual Report ===\n*Not available*\n\n")
 
-    # Document 2: Corporate Governance Statement
-    # CGS is typically within the AR - note if we have the AR
-    if ar_text:
+    # Document 2: Corporate Governance Statement. A standalone CGS may now
+    # exist in governance/ (Stage 2); when it does, supply its real text -
+    # otherwise the CGS is embedded in the AR.
+    from input_sources import (
+        load_asa_guidelines, load_cgs_text, load_latest_meeting_text,
+        load_latest_vi_text,
+    )
+    cgs_text = load_cgs_text(workspace_dir)
+    prior_vi_text = load_latest_vi_text(workspace_dir)
+    prior_meeting_text = load_latest_meeting_text(workspace_dir)
+    asa_guidelines_text = load_asa_guidelines()
+
+    if cgs_text:
+        docs_supplied.append("2. Corporate Governance Statement (standalone)")
+        parts.append("=== DOCUMENT 2: Corporate Governance Statement ===\n")
+        parts.append(cgs_text)
+        parts.append("\n\n")
+    elif ar_text:
         docs_supplied.append("2. Corporate Governance Statement (within AR)")
         parts.append("=== DOCUMENT 2: Corporate Governance Statement ===\n")
         parts.append("Included within the Annual Report text above.\n\n")
@@ -376,25 +391,37 @@ def _build_board_questions_payload(
 
     # Document 6: Prior year VI Report (optional). Only *_VIR.pdf counts:
     # AGM/EGM reports share this directory and are not VI material.
-    vi_dir = workspace_dir / "vi_reports"
-    if vi_dir.exists() and list(vi_dir.glob("*_VIR.pdf")):
-        docs_supplied.append("6. Prior year VI Report (available)")
+    if prior_vi_text:
+        docs_supplied.append("6. Prior year VI Report")
+        parts.append("=== DOCUMENT 6: Prior year ASA Voting Intentions Report ===\n")
+        parts.append(prior_vi_text)
+        parts.append("\n\n")
     else:
         parts.append("=== DOCUMENT 6: Prior year ASA Voting Intentions Report ===\n*Not available*\n\n")
 
-    # Document 7: Prior year AGM Report (optional)
-    # Check in vi_reports or a separate directory
-    agm_report_found = any(vi_dir.glob("*AGM*")) if vi_dir.exists() else False
-    if agm_report_found:
-        docs_supplied.append("7. Prior year AGM Report (available)")
+    # Document 7: Prior year AGM Report (optional).
+    if prior_meeting_text:
+        docs_supplied.append("7. Prior year AGM Report")
+        parts.append("=== DOCUMENT 7: Prior year ASA AGM Report ===\n")
+        parts.append(prior_meeting_text)
+        parts.append("\n\n")
     else:
         parts.append("=== DOCUMENT 7: Prior year ASA AGM Report ===\n*Not available*\n\n")
+
+    # Document 8: ASA guidelines (latest, loaded from the guidelines folder).
+    if asa_guidelines_text:
+        docs_supplied.append("8. ASA Guidelines")
+        parts.append("=== DOCUMENT 8: ASA GUIDELINES (latest) ===\n")
+        parts.append(asa_guidelines_text)
+        parts.append("\n\n")
+    else:
+        parts.append("=== DOCUMENT 8: ASA GUIDELINES ===\n*Not available*\n\n")
 
     # Document inventory
     parts.append("=== DOCUMENT INVENTORY ===\n")
     parts.append(f"Documents supplied: {', '.join(docs_supplied) if docs_supplied else 'none'}")
     if len(docs_supplied) < 5:
-        parts.append(f"Documents not supplied: {[str(i) for i in range(1, 8) if i not in [int(d.split('.')[0].strip()[-1]) for d in docs_supplied]]}")
+        parts.append(f"Documents not supplied: {[str(i) for i in range(1, 9) if i not in [int(d.split('.')[0].strip()[-1]) for d in docs_supplied]]}")
 
     return "\n".join(parts)
 

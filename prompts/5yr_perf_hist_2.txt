@@ -23,6 +23,22 @@ Underlying NPAT definition as used in the 5-year extraction.
 Do not re-extract metrics already found in Prompt 1 — this call is gap-filling 
 only.
 
+UNDERLYING NPAT FALLBACK (mandatory): If the FY{year} report does not disclose
+a SEPARATE "underlying NPAT" / "NPAT excluding notable items" figure (as is the
+case for Macquarie, which reports a single statutory NPAT), you MUST set
+underlying_npat EQUAL TO npat — never null — and set
+underlying_npat_basis_note = "Underlying NPAT not separately disclosed; NPAT
+(statutory) used." A null underlying_npat is only correct when the year itself
+is missing, not when the report simply has no distinct "underlying" concept.
+
+SHARE PRICE: share_price is only recordable when THIS year's report contains a
+structured, year-dated closing share price (e.g. a "Five Year Summary" with a
+share price row, or "shares on issue / market capitalisation" at FY end).
+Macquarie's five-year summary does NOT publish a per-year closing share price,
+so leave share_price null (and list it in missing_metrics) rather than derive
+or guess one. A share price quoted incidentally in prose should not be taken as
+the FY-end closing price unless it is clearly label-dated to the FY end.
+
 OUTPUT — JSON using the EXACT same structure as Prompt 1a, wrapped in a "years" key, 
 so the results can be merged programmatically:
 

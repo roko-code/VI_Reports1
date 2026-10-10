@@ -29,7 +29,28 @@ the company itself presents as realised, actual or take-home remuneration for
 the CEO. Look for headings and labels such as:
 
   "realised remuneration", "actual remuneration", "realised pay",
-  "actual pay received", "remuneration actually received"
+  "actual pay received", "remuneration actually received",
+  "awarded remuneration", "awarded pay", "take-home pay",
+  "awarded profit share", "total awarded remuneration"
+
+
+IF THE COMPANY CALLS IT "AWARDED REMUNERATION" (Macquarie and similar):
+  Macquarie discloses its CEO's realised-equivalent as "awarded remuneration",
+  not "realised". Its FY2026 breakdown is FIXED remuneration + AWARDED profit
+  share (already adjusted for risk/regulatory matters) + PSU allocations. That
+  "FY2026 total awarded remuneration" summary line IS the disclosed figure for
+  RULE 1. Do not treat the absence of the word "realised" as a non-disclosure,
+  and do not hand-pick a single component (e.g. fixed remuneration $1.5m) as
+  the total. Read the TOTAL awarded figure, not a sub-line.
+
+PERCENTAGE vs DOLLAR DISAMBIGUATION (apply to every figure you extract):
+  A percentage is never a remuneration total. Macquarie is a frequent trap:
+  "reduced by 25%" or "21% reduction in total" are ADJUSTMENT PERCENTAGES, not
+  dollar figures, and "0.021" is not a remuneration value. When a page gives
+  both a percentage and a dollar total for the same quantity, record the DOLLAR
+  total. A "ceo_realised_rem" below $0.8m is almost always a percentage or a
+  sub-component misread as the total - re-read the summary line before trusting
+  such a value.
 
 If such a figure exists for the CEO in TARGET_FY:
   - Set "disclosed_realised_rem" to it, and "disclosed_realised_source_page"

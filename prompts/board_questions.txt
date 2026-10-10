@@ -31,6 +31,7 @@ Mandatory:
 Optional, if available:
 6. Prior year's ASA Voting Intentions (VI) Report for this company.
 7. Prior year's ASA AGM Report for this company (the post-AGM record of the Board's answers and any follow-up commitments).
+8. The current ASA guidelines, loaded from the guidelines folder. Reference only - use them to ground questions in the correct guideline rule and threshold, but do not restate the guidelines.
 
 If 6 and/or 7 are not supplied, skip category 2 for the missing document and say so explicitly rather than guessing at what last year's concerns might have been — do not reconstruct prior-year issues from this year's Annual Report alone, since that risks inventing a "prior concern" that was never actually raised.
 

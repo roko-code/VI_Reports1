@@ -4,7 +4,6 @@ import re
 import shutil
 from pathlib import Path
 from typing import Optional
-import pypdf
 from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
 from logging_utils import write_supporting_text
@@ -31,10 +30,6 @@ AR_BUDGET_CHARS = int(os.getenv("AR_BUDGET_CHARS", "200000"))
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
-DATA_DIR = BASE_DIR / "data"
-
-# Domain-specific directory structure (shared reference docs at project level)
-ASA_GUIDELINES_DIR = DATA_DIR / "asa_guidelines"
 
 
 def load_prompt(filename: str) -> str:
@@ -45,24 +40,15 @@ def load_prompt(filename: str) -> str:
     return prompt_path.read_text(encoding="utf-8").strip()
 
 
-def extract_pdf_text(pdf_path: Path) -> str:
-    """Extracts raw text content from a PDF file."""
-    reader = pypdf.PdfReader(pdf_path)
-    text = ""
-    for idx, page in enumerate(reader.pages):
-        page_text = page.extract_text()
-        if page_text:
-            text += f"\n--- Page {idx + 1} ---\n" + page_text
-    return text
-
-
 def load_asa_guidelines() -> str:
-    """Loads text from the PDF stored in data/asa_guidelines/."""
-    pdf_files = list(ASA_GUIDELINES_DIR.glob("*.pdf"))
-    if not pdf_files:
-        raise FileNotFoundError(f"No ASA Guideline PDF found in {ASA_GUIDELINES_DIR.relative_to(BASE_DIR)}")
-    print(f"Loading ASA Guideline: {pdf_files[0].name}")
-    return extract_pdf_text(pdf_files[0])
+    """All ASA guideline PDFs in data/asa_guidelines/, concatenated.
+
+    Folder-driven: adding/replacing a PDF in the folder changes what is sent
+    with no prompt edit. Delegates to the shared loader so every assessment
+    stage reads the same set of guidelines.
+    """
+    from input_sources import load_asa_guidelines as _load_all
+    return _load_all()
 
 
 def has_director_resolutions(nom_data: dict) -> bool:
@@ -152,11 +138,13 @@ def call_llm_with_fallback(client: OpenAI, system_prompt: str, user_payload: str
     return response.choices[0].message.content.strip()
 
 
-def run_director_assessment(json_path: Path, ar_path: Path, asa_text: str, client: OpenAI, system_prompt: str, reports_dir: Path, supporting_data_dir: Path = None, logger=None, archive_dir: Path = None, news_block: str = ""):
+def run_director_assessment(json_path: Path, ar_path: Path, asa_text: str, client: OpenAI, system_prompt: str, reports_dir: Path, supporting_data_dir: Path = None, logger=None, archive_dir: Path = None, news_block: str = "", cgs_text: str = None, prior_vi_text: str = None, prior_meeting_text: str = None):
     """Executes LLM evaluation using JSON, Annual Report, and ASA Guidelines.
 
     news_block: pre-fetched news search results (Stage 7.5), supplied as
     supplementary external context. Empty string omits the section.
+    cgs_text / prior_vi_text / prior_meeting_text: folder-driven standalone
+    CGS and prior ASA VI / AGM report; None omits the section.
     """
     if logger:
         logger.info(f"Processing Director Assessment for: {json_path.name} + {ar_path.name}")
@@ -224,6 +212,23 @@ def run_director_assessment(json_path: Path, ar_path: Path, asa_text: str, clien
             f"{news_block}"
         )
 
+    # Folder-driven supplementary sources (2026-10-10). Each omitted when absent.
+    if cgs_text and cgs_text.strip():
+        user_payload += (
+            "\n\n=== INPUT 5: CORPORATE GOVERNANCE STATEMENT (standalone CGS) ===\n"
+            f"{cgs_text}"
+        )
+    if prior_vi_text and prior_vi_text.strip():
+        user_payload += (
+            "\n\n=== INPUT 6: PRIOR ASA VOTING INTENTIONS REPORT ===\n"
+            f"{prior_vi_text}"
+        )
+    if prior_meeting_text and prior_meeting_text.strip():
+        user_payload += (
+            "\n\n=== INPUT 7: PRIOR ASA AGM/EGM MEETING REPORT ===\n"
+            f"{prior_meeting_text}"
+        )
+
     if logger:
         logger.info(f"Requesting LLM assessment for {json_path.name} via {DIRECTOR_ASSESS_PRIMARY_MODEL}")
 
@@ -278,6 +283,13 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
     system_prompt = load_prompt("director_assess.txt")
     asa_text = load_asa_guidelines()
 
+    # Folder-driven supplementary sources (2026-10-10), loaded once and shared
+    # by every per-candidate call.
+    from input_sources import load_cgs_text, load_latest_meeting_text, load_latest_vi_text
+    cgs_text = load_cgs_text(workspace_dir)
+    prior_vi_text = load_latest_vi_text(workspace_dir)
+    prior_meeting_text = load_latest_meeting_text(workspace_dir)
+
     extracted_json_dir = workspace_dir / "extracted_json"
     workspace_nom_json_dir = extracted_json_dir / "notices"
     workspace_nom_json_archive_dir = extracted_json_dir / "notices_archived"
@@ -324,7 +336,7 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
             continue
 
         try:
-            result = run_director_assessment(json_path, ar_path, asa_text, client, system_prompt, workspace_reports_dir, supporting_data_dir, logger, workspace_nom_json_archive_dir, news_block=news_block)
+            result = run_director_assessment(json_path, ar_path, asa_text, client, system_prompt, workspace_reports_dir, supporting_data_dir, logger, workspace_nom_json_archive_dir, news_block=news_block, cgs_text=cgs_text, prior_vi_text=prior_vi_text, prior_meeting_text=prior_meeting_text)
             if result:
                 success_count += 1
         except Exception as e:

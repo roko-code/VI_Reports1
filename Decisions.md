@@ -9,9 +9,11 @@ File Matching Convention
 	  notices/
 	    BHP_2026_NOM.pdf
 	    processed/
-	  annual_reports/
-	    BHP_2026_AR.pdf
-	  extracted_json/
+annual_reports/
+    BHP_2026_AR.pdf
+  governance/
+    BHP_2026_CGS.pdf
+  extracted_json/
 	    notices/
 	      BHP_2026_NOM.json
 	    notices_archived/
@@ -39,6 +41,21 @@ File Matching Convention
 - VI Reports are reference documents (like Annual Reports).
   They are downloaded from the ASA website and stored flat
   in the vi_reports/ subdirectory. No raw/processed split.
+
+- The ASA company page keeps two report families in sibling divs; both are
+  downloaded into vi_reports/ and told apart by name suffix:
+    {TICKER}_{YYYY}_VIR.pdf   Voting Intentions (VI) report
+    {TICKER}_{YYYY}_AGM.pdf   AGM meeting report
+    {TICKER}_{YYYY}_EGM.pdf   EGM meeting report (rare)
+  Not every type exists every year; missing years/type are recorded in
+  vi_reports_summary.json and skipped, not treated as failures.
+
+- A standalone Corporate Governance Statement (CGS) is a separate ASX
+  announcement ("Appendix 4G", formerly "CGC 4G"). It is saved to
+  governance/{TICKER}_{FY}_CGS.pdf, outside annual_reports/, because downstream
+  stages glob annual_reports/ assuming every PDF there is an AR. Many issuers
+  embed the CGS in the AR and file no standalone announcement; a miss
+  ("assumed embedded") does not fail Stage 2.
 
 - The VI Reports search window is [target_year - years_back, target_year - 1],
   i.e. the current AGM year's VI Report is never downloaded because this
@@ -114,6 +131,18 @@ File Matching Convention
   AUDIT_PRIMARY_MODEL / AUDIT_FALLBACK_MODEL
   REMEDIATION_PRIMARY_MODEL / REMEDIATION_FALLBACK_MODEL
 
+- A global override exists for quick testing: set LLM_PRIMARY_OVERRIDE /
+  LLM_FALLBACK_OVERRIDE to force every stage onto the same model. When set, the
+  override wins over the stage-specific vars. Resolution is centralised in
+  src/llm_config.py; every stage must go through it (get_model / get_single_model
+  / the stage getters) rather than reading os.getenv("..._MODEL") directly -
+  performance_table and report_rendering once read .env directly and silently
+  ignored the override.
+
+- llm_config reads the override lazily (at call time, not import time). Reading
+  it at import time is a bug: every stage module calls load_dotenv() AFTER its
+  imports, so an import-time read sees an unset variable and drops the override.
+
 - Each module has its own TokenBucket rate limiter (20 RPM default).
 - All modules use OpenRouter base URL with OpenAI-compatible client.
 
@@ -155,6 +184,43 @@ File Matching Convention
 - Stale performance_table_built flag automatically reset if
   output has no years extracted.
 - All pipeline_status flags default to False on fresh workspace.
+
+## Checkpointing & Resume (Stage 4)
+
+- Stage 4 persisted LLM checkpoints in SQLite at
+  supporting_data/stage4_performance_table/pipeline.db
+  (tables: extraction_checkpoints, call_log, facts, pages).
+- Checkpoints are keyed by (run_id, extractor, fiscal_year). The run_id is
+  DETERMINISTIC - it is the workspace name (e.g. "SUN_2026") - so a re-run
+  resumes completed checkpoints instead of starting fresh. A random uuid per
+  invocation would defeat resume-after-rate-limit, so never pass a random run_id.
+- Per-year prompts (prompt_2, prompt_3) key on their fiscal year; the
+  non-yeared prompts (prompt_1a, prompt_1b, prompt_4) key on year 0.
+- A completed checkpoint returns its cached result verbatim (no LLM call);
+  a failed checkpoint is retried. Attempts are logged to call_log.
+
+## Validation Layer (the checking layer)
+
+- Validators are deliberately separate from extraction so a validator pass is
+  never the report's own model self-confirming its output. Read
+  docs/validator_traps.md before trusting any "pass".
+- src/currency_anchor.py - per-ROW currency + scale resolution. Currency is a
+  per-row attribute in a dual-listed issuer's remuneration tables (RIO p.138
+  carries A$ and GBP in one column, p.140 GBP/SGD/A$/C$ in one STIP table), so
+  nothing may anchor currency at page level.
+- src/disclosure_check.py - proves a DISCLOSED realised-remuneration CEO row
+  exists before a `not_disclosed` answer is accepted (NAB FY24 p.145 publishes
+  a realised row the model once called no_realised_disclosure).
+  check_disclosed_realised() applies the same rule at the prose level in
+  Stages 4 and 5.
+- src/citation_check.py - `[p.N]` citations reference pages actually supplied.
+  Existence only, not accuracy.
+- Gold set - tests/gold_set.json holds hand-verified CEO pay cells (value,
+  currency, scale, basis, printed page, quote snippet) for RIO/SUN/NAB/CSL.
+  It is ground truth the Stage-4 validators are scored against; cells carry
+  verified:false until a human confirms each against the printed report.
+  No embeddings/sqlite-vec until this gold set proves retrieval finds the right
+  page.
 
 Ensure consistency across steps so automated pipelines can match raw PDFs to their
 generated JSON metadata by filename prefix and suffix.

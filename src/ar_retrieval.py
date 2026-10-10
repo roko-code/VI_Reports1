@@ -604,6 +604,8 @@ STAGE5_SPECS: tuple[SectionSpec, ...] = (
             # Anchor phrases verified against all 14 cached reports. Australian
             # issuers say "actual remuneration"; UK-format issuers say
             # "remuneration actually received"; several say "realised".
+            # Macquarie (and other bank-style issuers) say "awarded
+            # remuneration" / "profit share" / "PSU" instead of either.
             "actual remuneration",
             "actual and maximum",
             "percentage of maximum",
@@ -615,6 +617,10 @@ STAGE5_SPECS: tuple[SectionSpec, ...] = (
             "target remuneration",
             "actual pay received",
             "remuneration actually",
+            "awarded remuneration",
+            "awarded pay",
+            "take-home pay",
+            "take home pay",
         ],
         priority=TIER_MANDATORY,
         max_pages=10,
@@ -638,6 +644,9 @@ STAGE5_SPECS: tuple[SectionSpec, ...] = (
         keywords=[
             "short-term incentive", "short term incentive", "sti",
             "annual incentive", "performance against targets", "scorecard",
+            # Macquarie's STI is called "profit share"; the awarded table is
+            # the analogue of an STI outcomes table.
+            "profit share",
         ],
         priority=TIER_HIGH,
         max_pages=10,
