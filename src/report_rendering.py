@@ -508,15 +508,19 @@ def _populate_financial_table(doc: docx.Document, perf_data: Dict[str, Any], yea
             if col_idx >= len(table.columns):
                 continue
             pay_data = ceo_pay.get(fy, {})
+            # The compiled JSON stores `value_m`; `value_aud_m` was an old key
+            # that Stage 4 no longer writes. Fall back so the row is not left
+            # as em-dashes when the payload only has value_m.
             val_aud = pay_data.get("value_aud_m")
+            if val_aud is None:
+                val_aud = pay_data.get("value_m")
             val_src = pay_data.get("value_m")
             currency = pay_data.get("currency", "AUD")
             fx_rate = pay_data.get("fx_rate")
             if val_aud is not None:
-                if currency != "AUD" and val_aud != pay_data.get("value_m"):
+                if currency != "AUD" and val_aud != val_src:
                     # Show both source currency and AUD
-                    val_src_display = pay_data.get("value_m")
-                    table.cell(7, col_idx).text = f"${val_aud:.2f}m AUD (${val_src_display:.2f}m {currency} @ {pay_data.get('fx_rate', 'N/A')})"
+                    table.cell(7, col_idx).text = f"${val_aud:.2f}m AUD (${val_src:.2f}m {currency} @ {fx_rate or 'N/A'})"
                 else:
                     table.cell(7, col_idx).text = f"${val_aud:.2f}m"
             else:
@@ -578,68 +582,31 @@ def _populate_ceo_remuneration_table(doc: docx.Document, rem_markdown: str) -> N
     for line in lines:
         # Look for the framework line
         if 'Target and maximum framework' in line or ('Fixed pay' in line and 'STI' in line and 'LTI' in line):
-            # Extract fixed pay - "Fixed pay: $2.185m" or "fixed pay (FR) $2,500,000"
-            match = re.search(r'[Ff]ixed pay.*?\$([\d.,]+(?:\s*m)?)', line)
-            if match:
-                fixed_target = _parse_money_value(match.group(0))
-            
-            # Extract STI target - "STI target: 100% fixed pay = $2.185m" or "Target STI ... 75% FR = $1,875,000"
-            match = re.search(r'(?:STI target|Target STI).*?=\s*\$([\d.,]+(?:\s*m)?)', line)
-            if match:
-                sti_cash_target = _parse_money_value(match.group(0))
-            
-            # Extract STI max - "STI max: 125% fixed pay = $2.731m" or "Max STI ... = $2,500,000"
-            match = re.search(r'(?:STI max|Max STI).*?=\s*\$([\d.,]+(?:\s*m)?)', line)
-            if match:
-                sti_cash_max = _parse_money_value(match.group(0))
-            
-            # Extract LTI target - "LTI face value/target: 150% fixed pay = $3.2775m" or "LTI 140% FR = $3,500,000"
-            match = re.search(r'LTI.*?=\s*\$([\d.,]+(?:\s*m)?)', line)
-            if match:
-                lti_target = _parse_money_value(match.group(0))
-            
-            # Extract Total target and Total max
-            # SUN format: "Total target remuneration = $2.185m + $2.185m + $3.2775m = $7.6475m. Total max remuneration = $2.185m + ..."
-            # NAB format: "Total max pay = $8,500,000"
-            idx_target = line.find('Total target')
-            idx_max = line.find('Total max')
-            idx_total = line.lower().find('total')
-            
-            if idx_target >= 0:
-                # SUN format: find the last $value before the next section or end of line
-                target_section = line[idx_target:]
-                # Stop at "Total max" if present
-                if idx_max >= 0:
-                    target_section = line[idx_target:idx_max]
-                # Find the last dollar amount in the section
-                dollar_matches = re.findall(r'=\s*\$([\d.,]+(?:\s*m)?)', target_section, re.IGNORECASE)
-                if dollar_matches:
-                    total_target = _parse_money_value(' '.join(dollar_matches[-1:]))
-            
-            if idx_max >= 0:
-                max_section = line[idx_max:]
-                dollar_matches = re.findall(r'=\s*\$([\d.,]+(?:\s*m)?)', max_section, re.IGNORECASE)
-                if dollar_matches:
-                    total_max = _parse_money_value(' '.join(dollar_matches[-1:]))
-            elif idx_total >= 0:
-                # Try NAB format: "Total max pay = $8,500,000"
-                match = re.search(r'Total\s+max\s+pay.*?=\s*\$([\d.,]+(?:\s*m)?)', line, re.IGNORECASE)
-                if match:
-                    total_max = _parse_money_value(match.group(0))
-                else:
-                    # Try "Total pay = $X" or "Total ... = $X"
-                    match = re.search(r'Total\s+(?:pay|remuneration).*?=\s*\$([\d.,]+(?:\s*m)?)', line, re.IGNORECASE)
-                    if match:
-                        # Determine if this is target or max based on context
-                        before = line[:match.start()].lower()
-                        if 'max' in before[-30:]:
-                            total_max = _parse_money_value(match.group(0))
-                        else:
-                            # Check if this comes after STI max, suggesting it's the total max
-                            if 'sti max' in before or 'total max' in before:
-                                total_max = _parse_money_value(match.group(0))
-                            elif total_target == "\u2014":
-                                total_target = _parse_money_value(match.group(0))
+            # Classify dollar amounts by the phrase that precedes them, so the
+            # parser tolerates each issuer's wording (SUN "Fixed pay: $2.185m",
+            # NAB "CEO fixed pay (FR) $2,500,000", MQG "CEO fixed remuneration:
+            # $1,526,819 ... Target STI: $6,300,000 ... LTI target face value
+            # approx. $4m") instead of assuming a single template.
+            for amt in re.finditer(r'\$\s*([\d.,]+)(?:\s*m)?', line):
+                raw = amt.group(1)
+                try:
+                    val = _parse_money_value(amt.group(0))
+                except Exception:
+                    continue
+                if val == "\u2014":
+                    continue
+                ctx = line[max(0, amt.start() - 60): amt.start()].lower()
+                if fixed_target == "\u2014" and ('fixed' in ctx and 'remuneration' in ctx or 'fixed pay' in ctx or 'fixed remuneration' in ctx):
+                    fixed_target = val
+                elif 'sti' in ctx and ('target' in ctx or 'cash' in ctx):
+                    if sti_cash_target == "\u2014":
+                        sti_cash_target = val
+                elif 'sti' in ctx and ('max' in ctx or 'maximum' in ctx):
+                    if sti_cash_max == "\u2014":
+                        sti_cash_max = val
+                elif 'lti' in ctx:
+                    if lti_target == "\u2014":
+                        lti_target = val
     
     # Populate the table cells
     # Table 3 structure: Rem Component, Target $m, % of Total, Max. Opp $m, % of Total
