@@ -556,13 +556,62 @@ def _parse_money_value(text: str) -> str:
     return "\u2014"
 
 
-def _populate_ceo_remuneration_table(doc: docx.Document, rem_markdown: str) -> None:
+def _load_ar_framework(workspace_dir, ticker: str, year: int):
+    """Extract the CEO framework figures from the Annual Report's own
+    "Awarded Remuneration" table (MQG ARR p.144), which is authoritative:
+    the model's Section 4 prose varies run to run and has produced wrong
+    figures (MQG FY2026 "target STI approx. $9.0m" vs the AR's $21.0m).
+
+    Returns (fixed, sti_cash, sti_equity, lti) in $millions, or None when the
+    AR table cannot be located or its internal arithmetic does not reconcile.
+    """
+    try:
+        from ar_file_lookup import find_ar_file
+        from ar_text_cache import get_ar_pages
+        from logging_utils import TechnicalLogger
+
+        ar_path = find_ar_file(workspace_dir, year, fallback=False,
+                               logger=TechnicalLogger(workspace_dir / "reports" / "technical_log.md"))
+        if not ar_path:
+            return None
+        ar_path = ar_path.path if hasattr(ar_path, "path") else ar_path
+        pages = get_ar_pages(ticker, year, ar_path)
+    except Exception:
+        return None
+
+    # Column order in the "Awarded Remuneration" data row:
+    #   Fixed | Total profit share | Cash | Retained equity | PSU | Total
+    # i.e. fixed=nums[0], sti_total=nums[1], sti_cash=nums[2],
+    #      sti_equity=nums[3], lti=nums[4], total=nums[5]
+    NUM = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?"
+    in_director_section = False
+    for page in pages:
+        text = page.get("text") or ""
+        for line in text.splitlines():
+            if "Executive Voting Director" in line or "Executive KMP awarded remuneration" in line:
+                in_director_section = True
+                continue
+            if not in_director_section:
+                continue
+            nums = re.findall(NUM, line)
+            if len(nums) >= 6:
+                vals = [float(n.replace(",", "")) for n in nums[:6]]
+                fixed, sti_total, sti_cash, sti_equity, lti, total = vals
+                # Reconcile against the row's own totals before trusting it.
+                if (abs(sti_total - (sti_cash + sti_equity)) <= 0.02 * sti_total
+                        and abs(total - (fixed + sti_total + lti)) <= 0.02 * total):
+                    return (fixed / 1_000_000.0, sti_cash / 1_000_000.0,
+                            sti_equity / 1_000_000.0, lti / 1_000_000.0)
+                # Not the CEO row (e.g. another Executive KMP) - keep scanning.
+    return None
+
+
+def _populate_ceo_remuneration_table(doc: docx.Document, rem_markdown: str, workspace_dir=None,
+                                    ticker=None, year=None) -> None:
     """Populate Table 3 (CEO Remuneration Framework) from the remuneration assessment.
     
-    Extracts framework values from Section 4's "Target and maximum framework" row.
-    Handles both formats:
-    - SUN: Fixed pay: $2.185m; STI target: 100% fixed pay = $2.185m
-    - NAB: CEO fixed pay (FR) $2,500,000; Target STI (Annual VR) 75% FR = $1,875,000
+    Primary source is the Annual Report's own "Awarded Remuneration" table
+    (see _load_ar_framework); the model's Section 4 prose is the fallback.
     """
     if len(doc.tables) < 4:
         return
@@ -570,6 +619,15 @@ def _populate_ceo_remuneration_table(doc: docx.Document, rem_markdown: str) -> N
     table = doc.tables[3]
     
     lines = rem_markdown.split('\n')
+
+    # Primary source: the AR's own "Awarded Remuneration" table. The model's
+    # Section 4 prose is unreliable across runs (MQG FY2026 "target STI
+    # approx. $9.0m" vs the AR's $21.0m), so the AR governs when present.
+    ar_fixed = ar_sti_cash = ar_sti_equity = ar_lti = None
+    if workspace_dir is not None and ticker and year:
+        ar_vals = _load_ar_framework(workspace_dir, ticker, year)
+        if ar_vals:
+            ar_fixed, ar_sti_cash, ar_sti_equity, ar_lti = ar_vals
 
     # Parsed amounts in $millions (None = not found).
     fixed = None
@@ -629,6 +687,19 @@ def _populate_ceo_remuneration_table(doc: docx.Document, rem_markdown: str) -> N
         sti_cash_max = sti_max_total * (sti_cash / sti_total)
         sti_equity_max = sti_max_total * (sti_equity / sti_total)
 
+    targets = [fixed, sti_cash, sti_equity, lti]
+    maxima = [fixed_max, sti_cash_max, sti_equity_max, lti_max]
+
+    # The AR governs: override anything the prose parser found with the
+    # authoritative table values (None keeps the prose value).
+    if ar_fixed is not None:
+        fixed = fixed_max = ar_fixed
+    if ar_sti_cash is not None:
+        sti_cash = sti_cash_max = ar_sti_cash
+    if ar_sti_equity is not None:
+        sti_equity = sti_equity_max = ar_sti_equity
+    if ar_lti is not None:
+        lti = lti_max = ar_lti
     targets = [fixed, sti_cash, sti_equity, lti]
     maxima = [fixed_max, sti_cash_max, sti_equity_max, lti_max]
 
@@ -1057,7 +1128,9 @@ def run_report_rendering(
 
     # Populate CEO remuneration framework table (Table 3) - structured data
     if rem_markdown:
-        _populate_ceo_remuneration_table(doc, rem_markdown)
+        _populate_ceo_remuneration_table(doc, rem_markdown,
+                                        workspace_dir=workspace_dir,
+                                        ticker=ticker, year=year)
 
     # Replace simple placeholders
     _replace_placeholders(doc, {
