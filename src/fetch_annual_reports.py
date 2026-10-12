@@ -21,21 +21,26 @@ def get_pdf_page_count(pdf_bytes: bytes) -> int:
 
 def resolve_pdf_url(html_text: str) -> str | None:
     """Extracts direct PDF path from the ASX HTML wrapper page."""
+    # ASX PDF URLs are on announcements.asx.com.au domain
+    match = re.search(r'(https?://announcements\.asx\.com\.au/asxpdf/[^\s"\'<>]+)', html_text, re.IGNORECASE)
+    if match:
+        return match.group(1)
+
     match = re.search(r'(/asxpdf/[^\s"\'<>]+)', html_text, re.IGNORECASE)
     if match:
         rel_url = match.group(1)
-        return rel_url if rel_url.startswith("http") else f"https://www.asx.com.au{rel_url}"
+        return f"https://announcements.asx.com.au{rel_url}"
 
     match = re.search(r'name=["\']pdfURL["\']\s+value=["\']([^"\']+)["\']', html_text, re.IGNORECASE) or \
             re.search(r'value=["\']([^"\']+)["\']\s+name=["\']pdfURL["\']', html_text, re.IGNORECASE)
     if match:
         rel_url = match.group(1)
-        return rel_url if rel_url.startswith("http") else f"https://www.asx.com.au{rel_url}"
+        return rel_url if rel_url.startswith("http") else f"https://announcements.asx.com.au{rel_url}"
 
     match = re.search(r'(?:href|src)\s*=\s*["\']([^"\']+\.pdf[^"\']*)["\']', html_text, re.IGNORECASE)
     if match:
         rel_url = match.group(1)
-        return rel_url if rel_url.startswith("http") else f"https://www.asx.com.au{rel_url}"
+        return rel_url if rel_url.startswith("http") else f"https://announcements.asx.com.au{rel_url}"
 
     return None
 
