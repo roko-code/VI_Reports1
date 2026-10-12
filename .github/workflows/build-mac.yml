@@ -1,0 +1,77 @@
+name: Build macOS App
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'asx_annual_reports.py'
+      - 'requirements.txt'
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  build-macos:
+    name: Build macOS .app
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build macOS app with PyInstaller
+        run: |
+          pyinstaller \
+            --name "ASX_Annual_Reports" \
+            --windowed \
+            --onefile \
+            --clean \
+            --noconfirm \
+            --hidden-import=lxml \
+            --hidden-import=lxml.etree \
+            --hidden-import=lxml.html \
+            --hidden-import=bs4 \
+            --hidden-import=bs4.builder._parser \
+            --hidden-import=pypdf \
+            --hidden-import=requests \
+            --hidden-import=tkinter \
+            asx_annual_reports.py
+
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "ASX Annual Reports" \
+            -srcfolder dist/ASX_Annual_Reports.app \
+            -ov -format UDZO \
+            ASX_Annual_Reports-macos.dmg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ASX_Annual_Reports-macos
+          path: |
+            dist/ASX_Annual_Reports.app
+            ASX_Annual_Reports-macos.dmg
+          retention-days: 30
+
+      - name: Upload to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ASX_Annual_Reports.app
+            ASX_Annual_Reports-macos.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
