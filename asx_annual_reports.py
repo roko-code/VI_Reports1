@@ -10,6 +10,7 @@ Built with PyInstaller/Nuitka frozen-detection support.
 
 import sys
 import os
+import io
 import threading
 import queue
 import webbrowser
@@ -30,7 +31,7 @@ import pypdf
 
 
 # ---------------------------------------------------------------------------
-# Frozen detection (PyInstaller / Nuitka)
+# Frozen detection (PyInstaller / Nuitka) & platform-specific paths
 # ---------------------------------------------------------------------------
 if getattr(sys, "frozen", False):
     # Running as compiled executable
@@ -42,11 +43,35 @@ else:
     IS_FROZEN = False
 
 
+def get_app_data_dir() -> Path:
+    """Get platform-appropriate writable application data directory."""
+    if sys.platform == "darwin":
+        # macOS: ~/Library/Application Support/AppName
+        return Path.home() / "Library" / "Application Support" / "ASX_Annual_Reports"
+    elif sys.platform == "win32":
+        # Windows: %LOCALAPPDATA%\AppName
+        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "ASX_Annual_Reports"
+    else:
+        # Linux/Unix: ~/.local/share/AppName
+        return Path.home() / ".local" / "share" / "ASX_Annual_Reports"
+
+
+def get_default_download_dir() -> Path:
+    """Get platform-appropriate default download directory."""
+    if sys.platform == "darwin":
+        return Path.home() / "Documents" / "ASX_Reports"
+    elif sys.platform == "win32":
+        return Path.home() / "Downloads" / "ASX_Reports"
+    else:
+        return Path.home() / "ASX_Reports"
+
+
 # ---------------------------------------------------------------------------
 # Constants & Configuration
 # ---------------------------------------------------------------------------
 ASX_API_BASE = "https://www.asx.com.au/asx/v2/statistics/announcements.do"
-DEFAULT_DOWNLOAD_DIR = BASE_DIR / "ASX_Reports"
+APP_DATA_DIR = get_app_data_dir()
+DEFAULT_DOWNLOAD_DIR = get_default_download_dir()
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 MIN_PDF_PAGES = 10
@@ -171,6 +196,9 @@ class ASXDownloaderApp:
 
         self.client = ASXClient()
         self.download_dir = DEFAULT_DOWNLOAD_DIR
+        # Ensure app data dir exists for settings
+        APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        # Ensure download dir exists
         self.download_dir.mkdir(parents=True, exist_ok=True)
 
         self.task_queue = queue.Queue()
@@ -270,7 +298,7 @@ class ASXDownloaderApp:
             self.download_dir = Path(path)
 
     def _load_settings(self):
-        settings_file = BASE_DIR / "settings.json"
+        settings_file = APP_DATA_DIR / "settings.json"
         if settings_file.exists():
             try:
                 with open(settings_file) as f:
@@ -281,7 +309,7 @@ class ASXDownloaderApp:
                 pass
 
     def _save_settings(self):
-        settings_file = BASE_DIR / "settings.json"
+        settings_file = APP_DATA_DIR / "settings.json"
         try:
             with open(settings_file, "w") as f:
                 json.dump({"download_dir": str(self.download_dir)}, f)
