@@ -74,8 +74,13 @@ APP_DATA_DIR = get_app_data_dir()
 DEFAULT_DOWNLOAD_DIR = get_default_download_dir()
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-MIN_PDF_PAGES = 10
-MIN_PDF_SIZE_BYTES = 500_000  # 500 KB
+# Annual Report thresholds
+AR_MIN_PDF_PAGES = 10
+AR_MIN_PDF_SIZE_BYTES = 500_000  # 500 KB
+
+# CGS thresholds (Appendix 4G is typically smaller)
+CGS_MIN_PDF_PAGES = 3
+CGS_MIN_PDF_SIZE_BYTES = 100_000  # 100 KB
 
 AR_KEYWORDS = [
     "Annual Report",
@@ -107,7 +112,7 @@ class ASXClient:
             print(f"[{level.upper()}] {msg}")
 
     def search_announcements(self, asx_code: str, year: int, timeframe: str = "Y") -> list[dict]:
-        """Search ASX announcements for a company/year."""
+        """Search ASX announcements for a company/year. Parses HTML response."""
         params = {
             "by": "asxCode",
             "asxCode": asx_code.upper(),
@@ -117,20 +122,72 @@ class ASXClient:
         try:
             resp = self.session.get(ASX_API_BASE, params=params, timeout=30)
             resp.raise_for_status()
-            data = resp.json()
-            return data.get("data", [])
+            
+            # Parse HTML response
+            soup = BeautifulSoup(resp.text, "html.parser")
+            announcements = []
+            
+            # Find all announcement links
+            for link in soup.find_all("a", href=True):
+                href = link["href"]
+                if "/asx/v2/statistics/displayAnnouncement.do" in href:
+                    # Extract headline from link text or nearby elements
+                    headline = link.get_text(strip=True)
+                    # Clean up headline (remove size info like "pages6.7MB")
+                    import re
+                    headline = re.sub(r"\s*pages?[\d\.]+[KM]?B?$", "", headline, flags=re.IGNORECASE).strip()
+                    
+                    # Build full URL
+                    if href.startswith("/"):
+                        url = "https://www.asx.com.au" + href
+                    else:
+                        url = href
+                    
+                    announcements.append({
+                        "headline": headline,
+                        "url": url,
+                        "documentUrl": url,
+                        "pdfUrl": url,
+                    })
+            
+            return announcements
         except Exception as e:
             self._log(f"Search failed for {asx_code} {year}: {e}", "error")
             return []
 
     def fetch_pdf_bytes(self, url: str) -> bytes | None:
-        """Download PDF content from URL."""
+        """Download PDF content from URL. Handles ASX HTML wrapper pages."""
         try:
             resp = self.session.get(url, timeout=60)
             resp.raise_for_status()
             content_type = resp.headers.get("Content-Type", "")
-            if "pdf" not in content_type.lower() and not url.lower().endswith(".pdf"):
-                self._log(f"URL does not appear to be a PDF: {url}", "warning")
+            
+            # If already a PDF, return directly
+            if "pdf" in content_type.lower() or url.lower().endswith(".pdf"):
+                return resp.content
+            
+            # If HTML, extract actual PDF URL from page
+            if "html" in content_type.lower():
+                # Look for PDF URL in announcements.asx.com.au domain
+                import re
+                pdf_urls = re.findall(r'https?://announcements\.asx\.com\.au/asxpdf/[^"\s>]+\.pdf', resp.text)
+                if pdf_urls:
+                    real_pdf_url = pdf_urls[0]
+                    self._log(f"Found real PDF URL: {real_pdf_url}")
+                    pdf_resp = self.session.get(real_pdf_url, timeout=60)
+                    pdf_resp.raise_for_status()
+                    return pdf_resp.content
+                
+                # Fallback: look for any .pdf URL
+                pdf_urls = re.findall(r'https?://[^"\s>]+\.pdf', resp.text)
+                if pdf_urls:
+                    real_pdf_url = pdf_urls[0]
+                    self._log(f"Found fallback PDF URL: {real_pdf_url}")
+                    pdf_resp = self.session.get(real_pdf_url, timeout=60)
+                    pdf_resp.raise_for_status()
+                    return pdf_resp.content
+            
+            self._log(f"URL does not appear to be a PDF and no PDF link found: {url}", "warning")
             return resp.content
         except Exception as e:
             self._log(f"PDF fetch failed for {url}: {e}", "error")
@@ -140,7 +197,7 @@ class ASXClient:
 # ---------------------------------------------------------------------------
 # PDF Verification
 # ---------------------------------------------------------------------------
-def verify_pdf(pdf_bytes: bytes) -> tuple[int, int, bool]:
+def verify_pdf(pdf_bytes: bytes, doc_type: str = "AR") -> tuple[int, int, bool]:
     """Verify PDF meets minimum page count and size. Returns (pages, size, valid)."""
     size = len(pdf_bytes)
     try:
@@ -149,7 +206,14 @@ def verify_pdf(pdf_bytes: bytes) -> tuple[int, int, bool]:
     except Exception:
         pages = 0
 
-    valid = pages >= MIN_PDF_PAGES and size >= MIN_PDF_SIZE_BYTES
+    if doc_type == "CGS":
+        min_pages = CGS_MIN_PDF_PAGES
+        min_size = CGS_MIN_PDF_SIZE_BYTES
+    else:
+        min_pages = AR_MIN_PDF_PAGES
+        min_size = AR_MIN_PDF_SIZE_BYTES
+
+    valid = pages >= min_pages and size >= min_size
     return pages, size, valid
 
 
@@ -420,7 +484,7 @@ class ASXDownloaderApp:
                             self.task_queue.put(("status", f"{code} {year}: Downloading AR..."))
                             pdf_bytes = self.client.fetch_pdf_bytes(url)
                             if pdf_bytes:
-                                pages, size, valid = verify_pdf(pdf_bytes) if self.verify_pdfs.get() else (0, len(pdf_bytes), True)
+                                pages, size, valid = verify_pdf(pdf_bytes, "AR") if self.verify_pdfs.get() else (0, len(pdf_bytes), True)
                                 if valid or not self.verify_pdfs.get():
                                     report_year = extract_report_year(cand.get("headline", ""), year)
                                     fname = f"{code}_{report_year}_AR.pdf"
@@ -458,7 +522,7 @@ class ASXDownloaderApp:
                             self.task_queue.put(("status", f"{code} {year}: Downloading CGS..."))
                             pdf_bytes = self.client.fetch_pdf_bytes(url)
                             if pdf_bytes:
-                                pages, size, valid = verify_pdf(pdf_bytes) if self.verify_pdfs.get() else (0, len(pdf_bytes), True)
+                                pages, size, valid = verify_pdf(pdf_bytes, "CGS") if self.verify_pdfs.get() else (0, len(pdf_bytes), True)
                                 if valid or not self.verify_pdfs.get():
                                     fname = f"{code}_{year}_CGS.pdf"
                                     fpath = self.download_dir / fname
