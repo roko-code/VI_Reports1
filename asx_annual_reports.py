@@ -25,7 +25,6 @@ import re
 import time
 
 import requests
-from lxml import html
 from bs4 import BeautifulSoup
 import pypdf
 
