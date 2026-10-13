@@ -2,6 +2,7 @@ import io
 import re
 import sys
 import time
+import json
 from pathlib import Path
 import pypdf
 from playwright.sync_api import sync_playwright, Page, BrowserContext
@@ -68,23 +69,37 @@ def detect_legacy_code_from_headline(headline: str, current_codes: list[str]) ->
 AR_SELECTION_CASES = [
     {
         "name": "annual_report",
-        "pattern": r"Annual Report|Annual Financial Report|Statutory Accounts|Financial Statements",
+        "pattern": r"Annual Report|Annual Financial Report|Statutory Accounts",
         "exclude": ["Concise", "Notice", "Proxy", "Presentation", "Explanatory",
                     "Note", "Addendum", "Clarification", "Erratum", "Correction",
                     "Letter", "Covering", "Dividend", "Extract"],
-        "min_pages": 10,
-        "min_size_bytes": 1_000_000,  # 1 MB
+        "min_pages": 50,
+        "min_size_bytes": 2_000_000,  # 2 MB
+    },
+    {
+        "name": "audited_financial",
+        "pattern": r"Audited Financial Statements|Consolidated Annual Financial Statements|Financial Statements\b",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
     },
     {
         "name": "appendix_4e",
         "pattern": r"Appendix 4E|Full Year Report|Corporate Report",
         "exclude": ["Letter", "Proxy", "Notice"],
         "min_pages": 5,
-        "min_size_bytes": 100_000,  # 100 KB
+        "min_size_bytes": 100_000,
     },
     {
         "name": "preliminary_final",
         "pattern": r"Preliminary Final Report",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "form_10k",
+        "pattern": r"Form 10-K",
         "exclude": ["Letter"],
         "min_pages": 5,
         "min_size_bytes": 100_000,
@@ -125,20 +140,6 @@ AR_SELECTION_CASES = [
         "min_size_bytes": 1_000_000,  # 1 MB
     },
     {
-        "name": "audited_financial",
-        "pattern": r"Audited Financial Statements|Consolidated Annual Financial Statements",
-        "exclude": ["Letter"],
-        "min_pages": 5,
-        "min_size_bytes": 100_000,
-    },
-    {
-        "name": "form_10k",
-        "pattern": r"Form 10-K",
-        "exclude": ["Letter"],
-        "min_pages": 5,
-        "min_size_bytes": 100_000,
-    },
-    {
         "name": "financial_results_full_year",
         "pattern": r"Financial Results\s+for\s+full\s+Year",
         "exclude": ["Letter"],
@@ -160,6 +161,15 @@ EXCEPTIONAL_COMPANIES = {
     "WES": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
     "CSL": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
 }
+
+# Load JSON override if present (extensible config without code changes)
+_exceptional_json_path = BASE_DIR.parent / "data" / "_reference" / "exceptional_companies.json"
+if _exceptional_json_path.exists():
+    try:
+        _json_data = json.loads(_exceptional_json_path.read_text())
+        EXCEPTIONAL_COMPANIES.update(_json_data)
+    except Exception:
+        pass
 
 
 def select_report_case(headline: str) -> dict | None:
@@ -346,14 +356,31 @@ def fetch_annual_reports(ticker: str, target_year: int, count: int = 5, supporti
                                 if link_tag.count() > 0 and not is_excluded:
                                     href = link_tag.get_attribute("href")
                                     full_url = href if href.startswith("http") else f"https://www.asx.com.au{href}"
+                                    # Capture reported file size for disambiguation (prefer larger within same case)
+                                    reported_size = 0
+                                    size_match = re.search(r'pages?\s*(\d+(?:\.\d+)?)\s*([KM])B?', headline_text, re.IGNORECASE) or \
+                                                 (len(cols) > 3 and re.search(r'(\d+(?:\.\d+)?)\s*([KM])B?', cols[3].inner_text(), re.IGNORECASE))
+                                    if size_match:
+                                        num = float(size_match.group(1))
+                                        unit = size_match.group(2).upper()
+                                        reported_size = int(num * (1000 if unit == "K" else 1_000_000))
                                     ar_candidates.append({
                                         "headline": headline_text,
                                         "url": full_url,
                                         "pub_year": search_year,
-                                        "case": matched_case
+                                        "case": matched_case,
+                                        "reported_size_bytes": reported_size,
                                     })
 
                     print(f"    Found {len(ar_candidates)} candidate(s) for [{current_code}] in {search_year}.")
+
+                    # Disambiguation: sort by case priority (annual_report first),
+                    # then by reported file size within the same case (prefer larger = more complete).
+                    case_priority = {c["name"]: i for i, c in enumerate(AR_SELECTION_CASES)}
+                    ar_candidates.sort(key=lambda c: (
+                        case_priority.get(c["case"]["name"], 99),
+                        -c.get("reported_size_bytes", 0),
+                    ))
 
                     for cand in ar_candidates:
                         case = cand["case"]

@@ -101,8 +101,8 @@ AR_SELECTION_CASES = [
         "exclude": ["Concise", "Notice", "Proxy", "Presentation", "Explanatory",
                     "Note", "Addendum", "Clarification", "Erratum", "Correction",
                     "Letter", "Covering", "Dividend", "Extract"],
-        "min_pages": 10,
-        "min_size_bytes": 1_000_000,  # 1 MB
+        "min_pages": 50,
+        "min_size_bytes": 2_000_000,  # 2 MB
     },
     {
         "name": "audited_financial",
@@ -225,11 +225,16 @@ class ASXClient:
             for link in soup.find_all("a", href=True):
                 href = link["href"]
                 if "/asx/v2/statistics/displayAnnouncement.do" in href:
-                    # Extract headline from link text or nearby elements
-                    headline = link.get_text(strip=True)
+                    raw_text = link.get_text(strip=True)
+                    # Extract reported file size (e.g., "pages3.4MB", "12 pages2.1MB")
+                    size_match = re.search(r'pages?\s*(\d+(?:\.\d+)?)\s*([KM])B?', raw_text, re.IGNORECASE)
+                    reported_size = 0
+                    if size_match:
+                        num = float(size_match.group(1))
+                        unit = size_match.group(2).upper()
+                        reported_size = int(num * (1000 if unit == "K" else 1_000_000))
                     # Clean up headline (remove size info like "pages6.7MB")
-                    import re
-                    headline = re.sub(r"\s*pages?[\d\.]+[KM]?B?$", "", headline, flags=re.IGNORECASE).strip()
+                    headline = re.sub(r"\s*pages?[\d\.]+[KM]?B?$", "", raw_text, flags=re.IGNORECASE).strip()
                     
                     # Build full URL
                     if href.startswith("/"):
@@ -239,6 +244,7 @@ class ASXClient:
                     
                     announcements.append({
                         "headline": headline,
+                        "reported_size_bytes": reported_size,
                         "url": url,
                         "documentUrl": url,
                         "pdfUrl": url,
@@ -584,6 +590,13 @@ class ASXDownloaderApp:
                             ar_candidates.append(ann)
 
                     if ar_candidates:
+                        # Disambiguation: sort by case priority (annual_report first),
+                        # then by reported file size within the same case (prefer larger = more complete).
+                        case_priority = {c["name"]: i for i, c in enumerate(AR_SELECTION_CASES)}
+                        ar_candidates.sort(key=lambda c: (
+                            case_priority.get(c["case"]["name"], 99),
+                            -c.get("reported_size_bytes", 0),
+                        ))
                         for cand in ar_candidates:
                             if not self.running:
                                 break
@@ -610,6 +623,7 @@ class ASXDownloaderApp:
                                             self.task_queue.put(("result", {"code": code, "year": report_year, "type": "AR", "status": "success", "path": str(fpath), "pages": pages, "size": size}))
                                         except Exception as e:
                                             self.task_queue.put(("result", {"code": code, "year": year, "type": "AR", "status": "error", "error": str(e)}))
+                                    break  # First valid AR for this year/case — stop downloading remaining candidates
                                 else:
                                     self.task_queue.put(("result", {"code": code, "year": year, "type": "AR", "status": "failed", "error": f"PDF verification failed: {pages} pages, {size} bytes (case: {case['name']})"}))
 
@@ -635,20 +649,24 @@ class ASXDownloaderApp:
                             self.task_queue.put(("status", f"{code} {year}: Downloading CGS..."))
                             pdf_bytes = self.client.fetch_pdf_bytes(url)
                             if pdf_bytes:
-                                pages, size, valid = verify_pdf(pdf_bytes, CGS_MIN_PDF_PAGES, CGS_MIN_PDF_SIZE_BYTES) if self.verify_pdfs.get() else (0, len(pdf_bytes), True)
-                                if valid or not self.verify_pdfs.get():
-                                    fname = f"{code}_{year}_CGS.pdf"
-                                    fpath = self.download_dir / fname
-                                    if self.skip_existing.get() and fpath.exists():
-                                        self.task_queue.put(("result", {"code": code, "year": year, "type": "CGS", "status": "skipped", "path": str(fpath)}))
-                                    else:
-                                        try:
-                                            fpath.write_bytes(pdf_bytes)
-                                            self.task_queue.put(("result", {"code": code, "year": year, "type": "CGS", "status": "success", "path": str(fpath), "pages": pages, "size": size}))
-                                        except Exception as e:
-                                            self.task_queue.put(("result", {"code": code, "year": year, "type": "CGS", "status": "error", "error": str(e)}))
+                                if not pdf_bytes.startswith(b"%PDF"):
+                                    self.task_queue.put(("result", {"code": code, "year": year, "type": "CGS", "status": "failed", "error": "Not a valid PDF"}))
+                                    continue
+
+                                size = len(pdf_bytes)
+                                pages, _, _ = verify_pdf(pdf_bytes) if self.verify_pdfs.get() else (0, size, True)
+                                # No min size/pages check for CGS — any valid PDF is accepted
+                                fname = f"{code}_{year}_CGS.pdf"
+                                fpath = self.download_dir / fname
+                                if self.skip_existing.get() and fpath.exists():
+                                    self.task_queue.put(("result", {"code": code, "year": year, "type": "CGS", "status": "skipped", "path": str(fpath)}))
                                 else:
-                                    self.task_queue.put(("result", {"code": code, "year": year, "type": "CGS", "status": "failed", "error": f"PDF verification failed: {pages} pages, {size} bytes"}))
+                                    try:
+                                        fpath.write_bytes(pdf_bytes)
+                                        self.task_queue.put(("result", {"code": code, "year": year, "type": "CGS", "status": "success", "path": str(fpath), "pages": pages, "size": size}))
+                                    except Exception as e:
+                                        self.task_queue.put(("result", {"code": code, "year": year, "type": "CGS", "status": "error", "error": str(e)}))
+                                break  # First valid CGS — stop downloading remaining candidates
 
                     completed += 1
                     self.task_queue.put(("progress", completed / total_tasks * 100))
