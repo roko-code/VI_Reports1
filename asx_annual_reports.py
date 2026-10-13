@@ -74,14 +74,6 @@ APP_DATA_DIR = get_app_data_dir()
 DEFAULT_DOWNLOAD_DIR = get_default_download_dir()
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-# Annual Report thresholds
-AR_MIN_PDF_PAGES = 10
-AR_MIN_PDF_SIZE_BYTES = 500_000  # 500 KB
-
-# CGS thresholds (Appendix 4G is typically smaller)
-CGS_MIN_PDF_PAGES = 3
-CGS_MIN_PDF_SIZE_BYTES = 100_000  # 100 KB
-
 AR_KEYWORDS = [
     "Annual Report",
     "Annual Financial Report",
@@ -93,7 +85,109 @@ CGS_KEYWORDS = [
     "Corporate Governance Statement",
     "Corporate Governance",
     "Appendix 4G",
+    "CGC 4G",
 ]
+
+# Case-Based AR Selection — matches the logic in src/fetch_annual_reports.py
+# Cases are tried in order; the first match wins. Each case defines:
+#   - pattern: regex to match the report headline (case-insensitive)
+#   - exclude: keywords that invalidate a match
+#   - min_pages: minimum PDF page count threshold
+#   - min_size_bytes: minimum PDF file size threshold
+AR_SELECTION_CASES = [
+    {
+        "name": "annual_report",
+        "pattern": r"Annual Report|Annual Financial Report|Statutory Accounts",
+        "exclude": ["Concise", "Notice", "Proxy", "Presentation", "Explanatory",
+                    "Note", "Addendum", "Clarification", "Erratum", "Correction",
+                    "Letter", "Covering", "Dividend", "Extract"],
+        "min_pages": 10,
+        "min_size_bytes": 1_000_000,  # 1 MB
+    },
+    {
+        "name": "audited_financial",
+        "pattern": r"Audited Financial Statements|Consolidated Annual Financial Statements|Financial Statements\b",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "appendix_4e",
+        "pattern": r"Appendix 4E|Full Year Report|Corporate Report",
+        "exclude": ["Letter", "Proxy", "Notice"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "preliminary_final",
+        "pattern": r"Preliminary Final Report",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "form_10k",
+        "pattern": r"Form 10-K",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "full_year_results",
+        "pattern": r"Full Year Results|Full Year Financial Results",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "annual_information_form",
+        "pattern": r"Annual Information Form",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "annual_results",
+        "pattern": r"Annual Results",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "fy_results",
+        "pattern": r"FY\d{2}\s+Results",
+        "exclude": ["Letter"],
+        "min_pages": 10,
+        "min_size_bytes": 10_000_000,  # 10 MB — disambiguate multiple FY Results matches
+    },
+    {
+        "name": "integrated_report",
+        "pattern": r"Integrated Report",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 1_000_000,
+    },
+    {
+        "name": "financial_results_full_year",
+        "pattern": r"Financial Results\s+for\s+full\s+Year",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+]
+
+# Exceptional companies: data spread across multiple reports
+# Type "split_remuneration" = remuneration report filed separately from AR
+EXCEPTIONAL_COMPANIES = {
+    "BHP": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "RIO": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "TCL": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "NAB": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "WBC": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "ANZ": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "WES": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "CSL": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +291,7 @@ class ASXClient:
 # ---------------------------------------------------------------------------
 # PDF Verification
 # ---------------------------------------------------------------------------
-def verify_pdf(pdf_bytes: bytes, doc_type: str = "AR") -> tuple[int, int, bool]:
+def verify_pdf(pdf_bytes: bytes, min_pages: int = 10, min_size_bytes: int = 1_000_000) -> tuple[int, int, bool]:
     """Verify PDF meets minimum page count and size. Returns (pages, size, valid)."""
     size = len(pdf_bytes)
     try:
@@ -206,24 +300,27 @@ def verify_pdf(pdf_bytes: bytes, doc_type: str = "AR") -> tuple[int, int, bool]:
     except Exception:
         pages = 0
 
-    if doc_type == "CGS":
-        min_pages = CGS_MIN_PDF_PAGES
-        min_size = CGS_MIN_PDF_SIZE_BYTES
-    else:
-        min_pages = AR_MIN_PDF_PAGES
-        min_size = AR_MIN_PDF_SIZE_BYTES
-
-    valid = pages >= min_pages and size >= min_size
+    valid = pages >= min_pages and size >= min_size_bytes
     return pages, size, valid
 
 
 # ---------------------------------------------------------------------------
-# Report Matching Logic
+# Case-Based Report Matching Logic
 # ---------------------------------------------------------------------------
-def is_annual_report(headline: str) -> bool:
-    """Check if announcement headline matches annual report patterns."""
+def select_report_case(headline: str) -> dict | None:
+    """Match a headline against AR selection cases. Returns the matched case dict or None."""
     headline_lower = headline.lower()
-    return any(kw.lower() in headline_lower for kw in AR_KEYWORDS)
+    for case in AR_SELECTION_CASES:
+        if any(ex.lower() in headline_lower for ex in case["exclude"]):
+            continue
+        if re.search(case["pattern"], headline, re.IGNORECASE):
+            return case
+    return None
+
+
+def is_annual_report(headline: str) -> bool:
+    """Check if announcement headline matches any annual report case. Maintains backward compat."""
+    return select_report_case(headline) is not None
 
 
 def is_cgs_report(headline: str) -> bool:
@@ -314,11 +411,13 @@ class ASXDownloaderApp:
 
         self.download_ar = tk.BooleanVar(value=True)
         self.download_cgs = tk.BooleanVar(value=True)
+        self.download_vi = tk.BooleanVar(value=True)
         self.verify_pdfs = tk.BooleanVar(value=True)
         self.skip_existing = tk.BooleanVar(value=True)
 
         ttk.Checkbutton(opt_frame, text="Download Annual Reports", variable=self.download_ar).pack(anchor=tk.W)
         ttk.Checkbutton(opt_frame, text="Download Corporate Governance Statements", variable=self.download_cgs).pack(anchor=tk.W)
+        ttk.Checkbutton(opt_frame, text="Download VI/AGM Reports (from ASA)", variable=self.download_vi).pack(anchor=tk.W)
         ttk.Checkbutton(opt_frame, text="Verify PDFs (page count + size)", variable=self.verify_pdfs).pack(anchor=tk.W)
         ttk.Checkbutton(opt_frame, text="Skip existing files", variable=self.skip_existing).pack(anchor=tk.W)
 
@@ -451,7 +550,13 @@ class ASXDownloaderApp:
         self.stop_btn.config(state=tk.DISABLED)
 
     def _worker(self, codes: list[str], start_y: int, end_y: int):
-        total_tasks = len(codes) * (end_y - start_y + 1) * (2 if self.download_ar.get() and self.download_cgs.get() else 1)
+        total_tasks = len(codes) * (end_y - start_y + 1)
+        if self.download_ar.get():
+            total_tasks += len(codes)
+        if self.download_cgs.get():
+            total_tasks += len(codes)
+        if self.download_vi.get():
+            total_tasks += len(codes)
         completed = 0
 
         for code in codes:
@@ -469,7 +574,14 @@ class ASXDownloaderApp:
                 if self.download_ar.get():
                     self.task_queue.put(("status", f"{code} {year}: Searching AR announcements..."))
                     announcements = self.client.search_announcements(code, year)
-                    ar_candidates = [a for a in announcements if is_annual_report(a.get("headline", ""))]
+                    
+                    # Case-based selection: each announcement matched against cases in order
+                    ar_candidates = []
+                    for ann in announcements:
+                        matched_case = select_report_case(ann.get("headline", ""))
+                        if matched_case:
+                            ann["case"] = matched_case
+                            ar_candidates.append(ann)
 
                     if ar_candidates:
                         for cand in ar_candidates:
@@ -481,10 +593,11 @@ class ASXDownloaderApp:
                             if not url.startswith("http"):
                                 url = "https://www.asx.com.au" + url
 
-                            self.task_queue.put(("status", f"{code} {year}: Downloading AR..."))
+                            case = cand.get("case", AR_SELECTION_CASES[0])
+                            self.task_queue.put(("status", f"{code} {year}: Downloading AR ({case['name']})..."))
                             pdf_bytes = self.client.fetch_pdf_bytes(url)
                             if pdf_bytes:
-                                pages, size, valid = verify_pdf(pdf_bytes, "AR") if self.verify_pdfs.get() else (0, len(pdf_bytes), True)
+                                pages, size, valid = verify_pdf(pdf_bytes, case["min_pages"], case["min_size_bytes"]) if self.verify_pdfs.get() else (0, len(pdf_bytes), True)
                                 if valid or not self.verify_pdfs.get():
                                     report_year = extract_report_year(cand.get("headline", ""), year)
                                     fname = f"{code}_{report_year}_AR.pdf"
@@ -498,7 +611,7 @@ class ASXDownloaderApp:
                                         except Exception as e:
                                             self.task_queue.put(("result", {"code": code, "year": year, "type": "AR", "status": "error", "error": str(e)}))
                                 else:
-                                    self.task_queue.put(("result", {"code": code, "year": year, "type": "AR", "status": "failed", "error": f"PDF verification failed: {pages} pages, {size} bytes"}))
+                                    self.task_queue.put(("result", {"code": code, "year": year, "type": "AR", "status": "failed", "error": f"PDF verification failed: {pages} pages, {size} bytes (case: {case['name']})"}))
 
                     completed += 1
                     self.task_queue.put(("progress", completed / total_tasks * 100))
@@ -522,7 +635,7 @@ class ASXDownloaderApp:
                             self.task_queue.put(("status", f"{code} {year}: Downloading CGS..."))
                             pdf_bytes = self.client.fetch_pdf_bytes(url)
                             if pdf_bytes:
-                                pages, size, valid = verify_pdf(pdf_bytes, "CGS") if self.verify_pdfs.get() else (0, len(pdf_bytes), True)
+                                pages, size, valid = verify_pdf(pdf_bytes, CGS_MIN_PDF_PAGES, CGS_MIN_PDF_SIZE_BYTES) if self.verify_pdfs.get() else (0, len(pdf_bytes), True)
                                 if valid or not self.verify_pdfs.get():
                                     fname = f"{code}_{year}_CGS.pdf"
                                     fpath = self.download_dir / fname
@@ -540,7 +653,132 @@ class ASXDownloaderApp:
                     completed += 1
                     self.task_queue.put(("progress", completed / total_tasks * 100))
 
+                # Exceptional companies: download split remuneration report
+                if code in EXCEPTIONAL_COMPANIES:
+                    exc = EXCEPTIONAL_COMPANIES[code]
+                    if exc.get("type") == "split_remuneration":
+                        self.task_queue.put(("status", f"{code}: Downloading split remuneration report..."))
+                        remuneration_saved = self._download_exceptional_report(code, end_y, end_y)
+                        if remuneration_saved:
+                            self.task_queue.put(("result", {"code": code, "year": end_y, "type": "REMUNERATION", "status": "success", "path": str(remuneration_saved)}))
+
+                # VI Reports from ASA (for latest year only)
+                if self.download_vi.get() and self.running:
+                    self.task_queue.put(("status", f"{code}: Downloading VI/AGM reports from ASA..."))
+                    vi_saved = self._download_vi_reports(code, end_y)
+                    if vi_saved:
+                        self.task_queue.put(("result", {"code": code, "year": end_y, "type": "VI", "status": "success", "path": str(vi_saved)}))
+
         self.task_queue.put(("done", None))
+
+    def _download_exceptional_report(self, ticker: str, search_year: int, target_year: int) -> str | None:
+        """Download split remuneration report for exceptional companies."""
+        announcements = self.client.search_announcements(ticker, search_year)
+        for ann in announcements:
+            headline = ann.get("headline", "")
+            if re.search(r"Remuneration Report|Remuneration Statement|Director Remuneration",
+                        headline, re.IGNORECASE):
+                if re.search(r"\b(Appendix|Note|Letter)\b", headline, re.IGNORECASE):
+                    continue
+                url = ann.get("url")
+                if not url:
+                    continue
+                self._log(f"Exceptional: Downloading remuneration report for {ticker}: {headline}")
+                pdf_bytes = self.client.fetch_pdf_bytes(url)
+                if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
+                    fname = f"{ticker}_{target_year}_REMUNERATION.pdf"
+                    fpath = self.download_dir / fname
+                    try:
+                        fpath.write_bytes(pdf_bytes)
+                        size_mb = round(len(pdf_bytes) / (1024 * 1024), 2)
+                        self._log(f"Exceptional: Saved {fname} ({size_mb} MB)")
+                        return str(fpath)
+                    except Exception as e:
+                        self._log(f"Exceptional: Error saving remuneration report: {e}", "error")
+        self._log(f"Exceptional: No remuneration report found for {ticker}")
+        return None
+
+    def _download_vi_reports(self, ticker: str, target_year: int) -> str | None:
+        """Download VI/AGM/EGM reports from ASA website."""
+        ASA_BASE_URL = "https://www.australianshareholders.com.au"
+        HEADERS = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+
+        years_back = 5
+        target_years = set(range(target_year - years_back, target_year))
+        vi_dir = self.download_dir / "vi_reports"
+        vi_dir.mkdir(parents=True, exist_ok=True)
+
+        company_url = f"{ASA_BASE_URL}/company/{ticker.lower()}/"
+        self._log(f"ASA: Scraping {company_url}")
+
+        try:
+            response = self.client.session.get(company_url, headers=HEADERS, timeout=15)
+        except Exception as e:
+            self._log(f"ASA: Error connecting for {ticker}: {e}", "warning")
+            return None
+
+        if response.status_code != 200:
+            self._log(f"ASA: Page returned HTTP {response.status_code} for {ticker}", "warning")
+            return None
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        sections = [
+            ("voting-intentions", "VI"),
+            ("meeting-reports", None),
+        ]
+
+        count = 0
+        for class_name, fixed_type in sections:
+            section = soup.find("div", class_=class_name)
+            if not section:
+                continue
+
+            for link in section.find_all("a", href=True):
+                href = link["href"]
+                link_text = link.get_text(strip=True)
+
+                year_match = re.search(r"(\d{4})", link_text)
+                if not year_match:
+                    continue
+
+                year = int(year_match.group(1))
+                if year not in target_years:
+                    continue
+
+                if fixed_type:
+                    report_type = fixed_type
+                else:
+                    report_type = "EGM" if re.search(r"\bEGM\b", link_text, re.IGNORECASE) else "AGM"
+
+                pdf_url = href if href.startswith("http") else ASA_BASE_URL + href
+                self._log(f"ASA: Downloading {link_text}")
+
+                try:
+                    pdf_response = self.client.session.get(pdf_url, headers=HEADERS, timeout=60)
+                    if pdf_response.status_code != 200:
+                        continue
+                    if not pdf_response.content.startswith(b"%PDF"):
+                        continue
+
+                    suffix = "VIR" if report_type == "VI" else report_type
+                    filename = f"{ticker}_{year}_{suffix}.pdf"
+                    file_path = vi_dir / filename
+                    with open(file_path, "wb") as f:
+                        f.write(pdf_response.content)
+
+                    size_kb = round(len(pdf_response.content) / 1024, 1)
+                    self._log(f"ASA: Saved {filename} ({size_kb} KB)")
+                    count += 1
+                except Exception as e:
+                    self._log(f"ASA: Error downloading {link_text}: {e}", "error")
+
+        if count > 0:
+            return str(vi_dir)
+        self._log(f"ASA: No VI reports found for years {sorted(target_years)}")
+        return None
 
     def _poll_queue(self):
         try:
