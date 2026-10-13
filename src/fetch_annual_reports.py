@@ -55,6 +55,124 @@ def detect_legacy_code_from_headline(headline: str, current_codes: list[str]) ->
                 return c_upper
     return None
 
+
+# ---------------------------------------------------------------------------
+# Case-Based AR Selection
+# ---------------------------------------------------------------------------
+# Cases are tried in order; the first matching case wins. Each case defines:
+#   - pattern: regex to match the report headline (case-insensitive)
+#   - exclude_keywords: keywords that invalidate a match (e.g., "Letter")
+#   - min_pages: minimum PDF page count threshold
+#   - min_size_bytes: minimum PDF file size threshold
+#   - min_size_mb: same as min_size_bytes (for readability in config)
+AR_SELECTION_CASES = [
+    {
+        "name": "annual_report",
+        "pattern": r"Annual Report|Annual Financial Report|Statutory Accounts|Financial Statements",
+        "exclude": ["Concise", "Notice", "Proxy", "Presentation", "Explanatory",
+                    "Note", "Addendum", "Clarification", "Erratum", "Correction",
+                    "Letter", "Covering", "Dividend", "Extract"],
+        "min_pages": 10,
+        "min_size_bytes": 1_000_000,  # 1 MB
+    },
+    {
+        "name": "appendix_4e",
+        "pattern": r"Appendix 4E|Full Year Report|Corporate Report",
+        "exclude": ["Letter", "Proxy", "Notice"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,  # 100 KB
+    },
+    {
+        "name": "preliminary_final",
+        "pattern": r"Preliminary Final Report",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "full_year_results",
+        "pattern": r"Full Year Results|Full Year Financial Results",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "annual_information_form",
+        "pattern": r"Annual Information Form",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "annual_results",
+        "pattern": r"Annual Results",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "fy_results",
+        "pattern": r"FY\d{2}\s+Results",
+        "exclude": ["Letter"],
+        "min_pages": 10,
+        "min_size_bytes": 10_000_000,  # 10 MB — disambiguate multiple FY Results matches
+    },
+    {
+        "name": "integrated_report",
+        "pattern": r"Integrated Report",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 1_000_000,  # 1 MB
+    },
+    {
+        "name": "audited_financial",
+        "pattern": r"Audited Financial Statements|Consolidated Annual Financial Statements",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "form_10k",
+        "pattern": r"Form 10-K",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+    {
+        "name": "financial_results_full_year",
+        "pattern": r"Financial Results\s+for\s+full\s+Year",
+        "exclude": ["Letter"],
+        "min_pages": 5,
+        "min_size_bytes": 100_000,
+    },
+]
+
+
+# Exceptional companies: data spread across multiple reports
+# Type "split_remuneration" = remuneration report filed separately from AR
+EXCEPTIONAL_COMPANIES = {
+    "BHP": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "RIO": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "TCL": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "NAB": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "WBC": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "ANZ": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "WES": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "CSL": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+}
+
+
+def select_report_case(headline: str) -> dict | None:
+    """Match a headline against AR selection cases. Returns the matched case dict or None."""
+    headline_lower = headline.lower()
+    for case in AR_SELECTION_CASES:
+        if any(ex.lower() in headline_lower for ex in case["exclude"]):
+            continue
+        if re.search(case["pattern"], headline, re.IGNORECASE):
+            return case
+    return None
+
+
 def safe_goto(page: Page, context: BrowserContext, url: str, max_retries: int = 3) -> Page:
     """Navigates to a URL with retry logic and page re-creation on HTTP2/network failures."""
     for attempt in range(1, max_retries + 1):
@@ -70,6 +188,65 @@ def safe_goto(page: Page, context: BrowserContext, url: str, max_retries: int = 
                 pass
             page = context.new_page()
     return page
+
+
+def fetch_remuneration_report(ticker: str, target_year: int, all_codes: list[str],
+                               context, ar_dir: Path) -> bool:
+    """For exceptional companies, fetch a separate remuneration report.
+
+    Returns True if a remuneration report was found and saved.
+    """
+    ticker_upper = ticker.upper()
+    if ticker_upper not in EXCEPTIONAL_COMPANIES:
+        return False
+
+    print(f"\n  [Exceptional] {ticker} has split remuneration report handling")
+
+    for current_code in all_codes:
+        search_url = f"https://www.asx.com.au/asx/v2/statistics/announcements.do?by=asxCode&asxCode={current_code}&timeframe=Y&year={target_year}"
+        new_page = context.new_page()
+        page = safe_goto(new_page, context, search_url)
+
+        rows = page.locator("table tr").all()
+        for row in rows:
+            cols = row.locator("td").all()
+            if len(cols) < 3:
+                continue
+            headline_text = cols[2].inner_text().strip()
+            link_tag = cols[2].locator("a")
+
+            if re.search(r"Remuneration Report|Remuneration Statement|Director Remuneration",
+                        headline_text, re.IGNORECASE):
+                if link_tag.count() > 0:
+                    href = link_tag.get_attribute("href")
+                    full_url = href if href.startswith("http") else f"https://www.asx.com.au{href}"
+
+                    print(f"    Found remuneration report: {headline_text}")
+                    res = context.request.get(full_url)
+                    if res.ok:
+                        pdf_bytes = res.body()
+                        if not pdf_bytes.startswith(b"%PDF"):
+                            html_text = pdf_bytes.decode("utf-8", errors="ignore")
+                            resolved_url = resolve_pdf_url(html_text)
+                            if resolved_url:
+                                pdf_res = context.request.get(resolved_url)
+                                if pdf_res.ok:
+                                    pdf_bytes = pdf_res.body()
+
+                        if pdf_bytes.startswith(b"%PDF"):
+                            fname = f"{ticker}_{target_year}_REMUNERATION.pdf"
+                            fpath = ar_dir / fname
+                            with open(fpath, "wb") as f:
+                                f.write(pdf_bytes)
+                            size_mb = round(len(pdf_bytes) / (1024 * 1024), 2)
+                            print(f"    Saved exceptional report: {fname} ({size_mb} MB)")
+                            page.close()
+                            return True
+        page.close()
+
+    print(f"    No separate remuneration report found for {ticker} FY{target_year}")
+    return False
+
 
 def fetch_annual_reports(ticker: str, target_year: int, count: int = 5, supporting_data_dir: Path = None, logger=None) -> tuple:
     """Downloads the past `count` Annual Reports plus the latest Corporate
@@ -157,26 +334,30 @@ def fetch_annual_reports(ticker: str, target_year: int, count: int = 5, supporti
                                 print(f"    [Inline Detection] Discovered former ticker code [{legacy_code}] from headline: '{headline_text}'")
                                 all_codes.append(legacy_code)
 
-                            is_ar_title = re.search(r"\b(?:Annual Report|Annual Financial Report|Statutory Accounts)\b", headline_text, re.IGNORECASE)
                             is_excluded = re.search(
                                 r"\b(?:Concise|Notice|Proxy|Presentation|Explanatory|Note|Notes|Addendum|Clarification|Erratum|Correction|Letter|Covering|Dividend|Extract)\b", 
                                 headline_text, 
                                 re.IGNORECASE
                             )
 
-                            if link_tag.count() > 0 and is_ar_title and not is_excluded:
-                                href = link_tag.get_attribute("href")
-                                full_url = href if href.startswith("http") else f"https://www.asx.com.au{href}"
-                                ar_candidates.append({
-                                    "headline": headline_text,
-                                    "url": full_url,
-                                    "pub_year": search_year
-                                })
+                            # Case-based AR selection
+                            matched_case = select_report_case(headline_text)
+                            if matched_case:
+                                if link_tag.count() > 0 and not is_excluded:
+                                    href = link_tag.get_attribute("href")
+                                    full_url = href if href.startswith("http") else f"https://www.asx.com.au{href}"
+                                    ar_candidates.append({
+                                        "headline": headline_text,
+                                        "url": full_url,
+                                        "pub_year": search_year,
+                                        "case": matched_case
+                                    })
 
                     print(f"    Found {len(ar_candidates)} candidate(s) for [{current_code}] in {search_year}.")
 
                     for cand in ar_candidates:
-                        print(f"\n    --> Candidate: {cand['headline']}")
+                        case = cand["case"]
+                        print(f"\n    --> Candidate: {cand['headline']} [case: {case['name']}]")
                         print(f"        Announcement URL: {cand['url']}")
                         
                         try:
@@ -203,7 +384,7 @@ def fetch_annual_reports(ticker: str, target_year: int, count: int = 5, supporti
                                     pdf_input = page.locator('input[name="pdfURL"], input[id="pdfURL"]')
                                     if pdf_input.count() > 0:
                                         rel_path = pdf_input.first.get_attribute("value")
-                                        pdf_url = rel_path if rel_path.startswith("http") else f"https://www.asx.com.au{rel_path}"
+                                        pdf_url = rel_path if rel_path.startswith("http") else f"https://announcements.asx.com.au{rel_path}"
                                         print(f"        Resolved Direct PDF URL (via DOM): {pdf_url}")
                                         pdf_res = context.request.get(pdf_url)
                                         if pdf_res.ok:
@@ -211,6 +392,7 @@ def fetch_annual_reports(ticker: str, target_year: int, count: int = 5, supporti
 
                             if pdf_bytes.startswith(b"%PDF"):
                                 total_pages = get_pdf_page_count(pdf_bytes)
+                                pdf_size = len(pdf_bytes)
                                 
                                 headline_year_match = re.search(r"\b(202[0-9])\b", cand["headline"])
                                 if headline_year_match:
@@ -224,8 +406,16 @@ def fetch_annual_reports(ticker: str, target_year: int, count: int = 5, supporti
                                 else:
                                     report_year = cand["pub_year"]
 
-                                if total_pages < 10:
-                                    print(f"        Skipping (Document has only {total_pages} page(s); likely an explanatory note).")
+                                # Case-specific validation thresholds
+                                min_pages = case["min_pages"]
+                                min_size = case["min_size_bytes"]
+                                
+                                if total_pages < min_pages:
+                                    print(f"        Skipping (Document has only {total_pages} page(s); minimum for case '{case['name']}' is {min_pages}).")
+                                    continue
+                                
+                                if pdf_size < min_size:
+                                    print(f"        Skipping (File size {pdf_size} bytes below minimum {min_size} bytes for case '{case['name']}').")
                                     continue
 
                                 if report_year in required_years:
@@ -233,8 +423,8 @@ def fetch_annual_reports(ticker: str, target_year: int, count: int = 5, supporti
                                     with open(file_name, "wb") as f:
                                         f.write(pdf_bytes)
                                     
-                                    size_mb = round(len(pdf_bytes) / (1024 * 1024), 2)
-                                    print(f"        SUCCESS: Saved {file_name.name} ({size_mb} MB, {total_pages} pages) [Year: {report_year}]")
+                                    size_mb = round(pdf_size / (1024 * 1024), 2)
+                                    print(f"        SUCCESS: Saved {file_name.name} ({size_mb} MB, {total_pages} pages) [Year: {report_year}, Case: {case['name']}]")
                                     downloaded_files[report_year] = str(file_name)
                                     required_years.remove(report_year)
                                     break
@@ -356,6 +546,19 @@ def fetch_annual_reports(ticker: str, target_year: int, count: int = 5, supporti
                 print("    Assuming the CGS is embedded in the Annual Report (common for some issuers).")
                 if logger:
                     logger.warning(f"No standalone CGS found for FY{target_year}; assuming it is embedded in the AR.")
+
+        # ---- Exceptional Companies: Split Remuneration Reports ----
+        # Some foreign-incorporated companies file the remuneration report
+        # separately from the annual report. Fetch it if configured.
+        if ticker in EXCEPTIONAL_COMPANIES:
+            exc_config = EXCEPTIONAL_COMPANIES[ticker]
+            if exc_config.get("type") == "split_remuneration":
+                print(f"\n  [Exceptional] {ticker}: Searching for separate remuneration report")
+                if logger:
+                    logger.info(f"Exceptional company {ticker}: searching for split remuneration report")
+                remuneration_saved = fetch_remuneration_report(ticker, target_year, all_codes, context, ar_dir)
+                if remuneration_saved and logger:
+                    logger.info(f"Remuneration report saved for {ticker} FY{target_year}")
 
         browser.close()
 

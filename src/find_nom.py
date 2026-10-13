@@ -42,13 +42,19 @@ def extract_and_download_pdf(wrapper_url):
     pdf_target = pdf_tag.get("src") if pdf_tag else None
 
     if not pdf_target:
-        match = re.search(r'https?://[^\s"\']+(?:markitdigital|asxpdf|\.pdf)[^\s"\']*', res.text)
+        match = re.search(r'https?://announcements\.asx\.com\.au/asxpdf/[^\s"\'<>]+', res.text)
+        if not match:
+            match = re.search(r'https?://[^\s"\']+(?:markitdigital|asxpdf|\.pdf)[^\s"\']*', res.text)
         if match:
             pdf_target = match.group(0)
 
     if pdf_target:
         if pdf_target.startswith("/"):
-            pdf_target = "https://www.asx.com.au" + pdf_target
+            # Relative paths on ASX are typically on announcements.asx.com.au now
+            if "/asxpdf/" in pdf_target:
+                pdf_target = "https://announcements.asx.com.au" + pdf_target
+            else:
+                pdf_target = "https://www.asx.com.au" + pdf_target
             
         pdf_res = SESSION.get(pdf_target, allow_redirects=True)
         if pdf_res.status_code == 200 and pdf_res.content.startswith(b"%PDF"):
