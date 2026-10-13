@@ -769,46 +769,47 @@ class ASXDownloaderApp:
 
     def _download_nom_report(self, ticker: str, target_year: int) -> str | None:
         """Download Notice of Meeting (NoM) PDF for the given ticker (latest year only).
-        Inlines the logic from src/fetch_nom.py for standalone executable use.
+        Searches both target_year and target_year-1, matching src/fetch_nom.py logic.
         """
-        announcements = self.client.search_announcements(ticker, target_year)
-        if not announcements:
-            self._log(f"NoM: No ASX announcements found for {ticker} in {target_year}")
-            return None
-
-        # Filter to NoM headlines only
-        nom_candidates = [a for a in announcements if re.search(NOM_PATTERN, a.get("headline", ""), re.IGNORECASE)]
-        if not nom_candidates:
-            self._log(f"NoM: No Notice of Meeting found for {ticker} in {target_year}")
-            return None
-
-        # Disambiguation: prefer non-letter announcements, then by reported file size
-        nom_candidates.sort(key=lambda a: (
-            not re.search(r"\bletter\b", a.get("headline", ""), re.IGNORECASE),
-            a.get("reported_size_bytes", 0),
-        ), reverse=False)
-
-        for cand in nom_candidates:
-            url = cand.get("url")
-            if not url:
+        for search_year in [target_year, target_year - 1]:
+            announcements = self.client.search_announcements(ticker, search_year)
+            if not announcements:
+                self._log(f"NoM: No ASX announcements found for {ticker} in {search_year}")
                 continue
-            if not url.startswith("http"):
-                url = "https://www.asx.com.au" + url
 
-            self._log(f"NoM: Downloading {cand['headline']} for {ticker}")
-            pdf_bytes = self.client.fetch_pdf_bytes(url)
-            if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
-                fname = f"{ticker}_{target_year}_NOM.pdf"
-                fpath = self.download_dir / fname
-                try:
-                    fpath.write_bytes(pdf_bytes)
-                    size_kb = round(len(pdf_bytes) / 1024, 1)
-                    self._log(f"NoM: Saved {fname} ({size_kb} KB)")
-                    return str(fpath)
-                except Exception as e:
-                    self._log(f"NoM: Error saving: {e}", "error")
-            else:
-                self._log(f"NoM: Could not resolve PDF for {cand['headline']}", "warning")
+            # Filter to NoM headlines only
+            nom_candidates = [a for a in announcements if re.search(NOM_PATTERN, a.get("headline", ""), re.IGNORECASE)]
+            if not nom_candidates:
+                self._log(f"NoM: No Notice of Meeting found for {ticker} in {search_year}")
+                continue
+
+            # Disambiguation: prefer non-letter announcements, then by reported file size
+            nom_candidates.sort(key=lambda a: (
+                not re.search(r"\bletter\b", a.get("headline", ""), re.IGNORECASE),
+                a.get("reported_size_bytes", 0),
+            ), reverse=False)
+
+            for cand in nom_candidates:
+                url = cand.get("url")
+                if not url:
+                    continue
+                if not url.startswith("http"):
+                    url = "https://www.asx.com.au" + url
+
+                self._log(f"NoM: Downloading {cand['headline']} for {ticker}")
+                pdf_bytes = self.client.fetch_pdf_bytes(url)
+                if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
+                    fname = f"{ticker}_{target_year}_NOM.pdf"
+                    fpath = self.download_dir / fname
+                    try:
+                        fpath.write_bytes(pdf_bytes)
+                        size_kb = round(len(pdf_bytes) / 1024, 1)
+                        self._log(f"NoM: Saved {fname} ({size_kb} KB)")
+                        return str(fpath)
+                    except Exception as e:
+                        self._log(f"NoM: Error saving: {e}", "error")
+                else:
+                    self._log(f"NoM: Could not resolve PDF for {cand['headline']}", "warning")
 
         self._log(f"NoM: No valid PDF found for {ticker}")
         return None
