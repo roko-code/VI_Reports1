@@ -88,6 +88,8 @@ CGS_KEYWORDS = [
     "CGC 4G",
 ]
 
+NOM_PATTERN = r'\bnotice\b.*\b(meeting|agm|egm|gm)\b'
+
 # Case-Based AR Selection — matches the logic in src/fetch_annual_reports.py
 # Cases are tried in order; the first match wins. Each case defines:
 #   - pattern: regex to match the report headline (case-insensitive)
@@ -255,6 +257,38 @@ class ASXClient:
             self._log(f"Search failed for {asx_code} {year}: {e}", "error")
             return []
 
+    def verify_asx_code(self, asx_code: str, year: int) -> bool:
+        """Verify that an ASX code is valid by checking the announcements page responds with data.
+        Returns True if the code exists and has announcement rows, False otherwise.
+        """
+        try:
+            resp = self.session.get(
+                ASX_API_BASE,
+                params={
+                    "by": "asxCode",
+                    "asxCode": asx_code.upper(),
+                    "timeframe": "Y",
+                    "year": year,
+                },
+                timeout=15,
+            )
+            if resp.status_code == 404:
+                self._log(f"ASX code '{asx_code}' not found (404)", "error")
+                return False
+            if resp.status_code != 200:
+                self._log(f"ASX code '{asx_code}' returned HTTP {resp.status_code}", "warning")
+                return False
+            # Check if the page contains announcement table rows
+            soup = BeautifulSoup(resp.text, "html.parser")
+            has_announcements = bool(soup.find("a", href=re.compile(r"displayAnnouncement\.do")))
+            if not has_announcements:
+                self._log(f"ASX code '{asx_code}' — no announcements found for {year}", "warning")
+                return False
+            return True
+        except Exception as e:
+            self._log(f"ASX code verification failed for '{asx_code}': {e}", "error")
+            return False
+
     def fetch_pdf_bytes(self, url: str) -> bytes | None:
         """Download PDF content from URL. Handles ASX HTML wrapper pages."""
         try:
@@ -417,12 +451,14 @@ class ASXDownloaderApp:
 
         self.download_ar = tk.BooleanVar(value=True)
         self.download_cgs = tk.BooleanVar(value=True)
+        self.download_nom = tk.BooleanVar(value=True)
         self.download_vi = tk.BooleanVar(value=True)
         self.verify_pdfs = tk.BooleanVar(value=True)
         self.skip_existing = tk.BooleanVar(value=True)
 
         ttk.Checkbutton(opt_frame, text="Download Annual Reports", variable=self.download_ar).pack(anchor=tk.W)
         ttk.Checkbutton(opt_frame, text="Download Corporate Governance Statements", variable=self.download_cgs).pack(anchor=tk.W)
+        ttk.Checkbutton(opt_frame, text="Download Notice of Meeting (NoM)", variable=self.download_nom).pack(anchor=tk.W)
         ttk.Checkbutton(opt_frame, text="Download VI/AGM Reports (from ASA)", variable=self.download_vi).pack(anchor=tk.W)
         ttk.Checkbutton(opt_frame, text="Verify PDFs (page count + size)", variable=self.verify_pdfs).pack(anchor=tk.W)
         ttk.Checkbutton(opt_frame, text="Skip existing files", variable=self.skip_existing).pack(anchor=tk.W)
@@ -521,7 +557,7 @@ class ASXDownloaderApp:
             messagebox.showwarning("Invalid Range", "Start year cannot be after end year.")
             return
 
-        if not self.download_ar.get() and not self.download_cgs.get():
+        if not self.download_ar.get() and not self.download_cgs.get() and not self.download_nom.get():
             messagebox.showwarning("No Selection", "Please select at least one document type to download.")
             return
 
@@ -561,6 +597,8 @@ class ASXDownloaderApp:
             total_tasks += len(codes)
         if self.download_cgs.get():
             total_tasks += len(codes)
+        if self.download_nom.get():
+            total_tasks += len(codes)
         if self.download_vi.get():
             total_tasks += len(codes)
         completed = 0
@@ -570,6 +608,13 @@ class ASXDownloaderApp:
                 break
 
             self.task_queue.put(("status", f"Processing {code}..."))
+
+            # Step 1: Verify ASX code validity — stop if invalid to avoid 404 spam
+            if not self.client.verify_asx_code(code, end_y):
+                self.task_queue.put(("result", {"code": code, "year": end_y, "type": "ALL", "status": "error", "error": f"Invalid or unknown ASX code: {code}"}))
+                completed += 1
+                self.task_queue.put(("progress", completed / total_tasks * 100))
+                continue
 
             # Check for AR announcements in each year
             for year in range(start_y, end_y + 1):
@@ -630,8 +675,8 @@ class ASXDownloaderApp:
                     completed += 1
                     self.task_queue.put(("progress", completed / total_tasks * 100))
 
-                # Corporate Governance Statements
-                if self.download_cgs.get() and self.running:
+                # Corporate Governance Statements (latest year only)
+                if self.download_cgs.get() and self.running and year == end_y:
                     self.task_queue.put(("status", f"{code} {year}: Searching CGS announcements..."))
                     announcements = self.client.search_announcements(code, year)
                     cgs_candidates = [a for a in announcements if is_cgs_report(a.get("headline", ""))]
@@ -687,6 +732,13 @@ class ASXDownloaderApp:
                     if vi_saved:
                         self.task_queue.put(("result", {"code": code, "year": end_y, "type": "VI", "status": "success", "path": str(vi_saved)}))
 
+                # Notice of Meeting (NoM) — latest year only
+                if self.download_nom.get() and self.running:
+                    self.task_queue.put(("status", f"{code}: Downloading Notice of Meeting (NoM)..."))
+                    nom_saved = self._download_nom_report(code, end_y)
+                    if nom_saved:
+                        self.task_queue.put(("result", {"code": code, "year": end_y, "type": "NOM", "status": "success", "path": str(nom_saved)}))
+
         self.task_queue.put(("done", None))
 
     def _download_exceptional_report(self, ticker: str, search_year: int, target_year: int) -> str | None:
@@ -714,6 +766,52 @@ class ASXDownloaderApp:
                     except Exception as e:
                         self._log(f"Exceptional: Error saving remuneration report: {e}", "error")
         self._log(f"Exceptional: No remuneration report found for {ticker}")
+        return None
+
+    def _download_nom_report(self, ticker: str, target_year: int) -> str | None:
+        """Download Notice of Meeting (NoM) PDF for the given ticker (latest year only).
+        Inlines the logic from src/fetch_nom.py for standalone executable use.
+        """
+        announcements = self.client.search_announcements(ticker, target_year)
+        if not announcements:
+            self._log(f"NoM: No ASX announcements found for {ticker} in {target_year}")
+            return None
+
+        # Filter to NoM headlines only
+        nom_candidates = [a for a in announcements if re.search(NOM_PATTERN, a.get("headline", ""), re.IGNORECASE)]
+        if not nom_candidates:
+            self._log(f"NoM: No Notice of Meeting found for {ticker} in {target_year}")
+            return None
+
+        # Disambiguation: prefer non-letter announcements, then by reported file size
+        nom_candidates.sort(key=lambda a: (
+            not re.search(r"\bletter\b", a.get("headline", ""), re.IGNORECASE),
+            a.get("reported_size_bytes", 0),
+        ), reverse=False)
+
+        for cand in nom_candidates:
+            url = cand.get("url")
+            if not url:
+                continue
+            if not url.startswith("http"):
+                url = "https://www.asx.com.au" + url
+
+            self._log(f"NoM: Downloading {cand['headline']} for {ticker}")
+            pdf_bytes = self.client.fetch_pdf_bytes(url)
+            if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
+                fname = f"{ticker}_{target_year}_NOM.pdf"
+                fpath = self.download_dir / fname
+                try:
+                    fpath.write_bytes(pdf_bytes)
+                    size_kb = round(len(pdf_bytes) / 1024, 1)
+                    self._log(f"NoM: Saved {fname} ({size_kb} KB)")
+                    return str(fpath)
+                except Exception as e:
+                    self._log(f"NoM: Error saving: {e}", "error")
+            else:
+                self._log(f"NoM: Could not resolve PDF for {cand['headline']}", "warning")
+
+        self._log(f"NoM: No valid PDF found for {ticker}")
         return None
 
     def _download_vi_reports(self, ticker: str, target_year: int) -> str | None:
