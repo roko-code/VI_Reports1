@@ -1,0 +1,42 @@
+{
+    "BHP": {
+        "type": "split_remuneration",
+        "description": "Remuneration report filed separately from annual report",
+        "additional_keywords": ["Remuneration Report", "Remuneration Statement", "Director Remuneration"]
+    },
+    "RIO": {
+        "type": "split_remuneration",
+        "description": "Remuneration report filed separately from annual report",
+        "additional_keywords": ["Remuneration Report", "Remuneration Statement", "Director Remuneration"]
+    },
+    "TCL": {
+        "type": "split_remuneration",
+        "description": "Remuneration report filed separately from annual report",
+        "additional_keywords": ["Remuneration Report", "Remuneration Statement", "Director Remuneration"]
+    },
+    "NAB": {
+        "type": "split_remuneration",
+        "description": "Remuneration report filed separately from annual report",
+        "additional_keywords": ["Remuneration Report", "Remuneration Statement", "Director Remuneration"]
+    },
+    "WBC": {
+        "type": "split_remuneration",
+        "description": "Remuneration report filed separately from annual report",
+        "additional_keywords": ["Remuneration Report", "Remuneration Statement", "Director Remuneration"]
+    },
+    "ANZ": {
+        "type": "split_remuneration",
+        "description": "Remuneration report filed separately from annual report",
+        "additional_keywords": ["Remuneration Report", "Remuneration Statement", "Director Remuneration"]
+    },
+    "WES": {
+        "type": "split_remuneration",
+        "description": "Remuneration report filed separately from annual report",
+        "additional_keywords": ["Remuneration Report", "Remuneration Statement", "Director Remuneration"]
+    },
+    "CSL": {
+        "type": "split_remuneration",
+        "description": "Remuneration report filed separately from annual report",
+        "additional_keywords": ["Remuneration Report", "Remuneration Statement", "Director Remuneration"]
+    }
+}
