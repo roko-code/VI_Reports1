@@ -142,7 +142,7 @@ AR_SELECTION_CASES = [
     },
     {
         "name": "annual_information_form",
-        "pattern": r"Annual Information Form",
+        "pattern": r"Consolidated Financial Statements",
         "exclude": ["Letter"],
         "min_pages": 5,
         "min_size_bytes": 100_000,
@@ -745,7 +745,7 @@ class ASXDownloaderApp:
         announcements = self.client.search_announcements(ticker, search_year)
         for ann in announcements:
             headline = ann.get("headline", "")
-            if re.search(r"Remuneration Report|Remuneration Statement|Director Remuneration",
+            if re.search(r"Remuneration Report|Remuneration Statement|Director Remuneration|Management Information Circular",
                         headline, re.IGNORECASE):
                 if re.search(r"\b(Appendix|Note|Letter)\b", headline, re.IGNORECASE):
                     continue

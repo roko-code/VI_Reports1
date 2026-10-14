@@ -113,7 +113,7 @@ AR_SELECTION_CASES = [
     },
     {
         "name": "annual_information_form",
-        "pattern": r"Annual Information Form",
+        "pattern": r"Consolidated Financial Statements",
         "exclude": ["Letter"],
         "min_pages": 5,
         "min_size_bytes": 100_000,
@@ -225,7 +225,7 @@ def fetch_remuneration_report(ticker: str, target_year: int, all_codes: list[str
             headline_text = cols[2].inner_text().strip()
             link_tag = cols[2].locator("a")
 
-            if re.search(r"Remuneration Report|Remuneration Statement|Director Remuneration",
+            if re.search(r"Remuneration Report|Remuneration Statement|Director Remuneration|Management Information Circular",
                         headline_text, re.IGNORECASE):
                 if link_tag.count() > 0:
                     href = link_tag.get_attribute("href")
