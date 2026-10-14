@@ -113,7 +113,7 @@ AR_SELECTION_CASES = [
     },
     {
         "name": "annual_information_form",
-        "pattern": r"Consolidated Financial Statements",
+        "pattern": r"Annual Information Form",
         "exclude": ["Letter"],
         "min_pages": 5,
         "min_size_bytes": 100_000,
@@ -160,6 +160,7 @@ EXCEPTIONAL_COMPANIES = {
     "ANZ": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
     "WES": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
     "CSL": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report"},
+    "CSC": {"type": "split_remuneration", "description": "Remuneration report filed separately from annual report as Management Information Circular"},
 }
 
 # Load JSON override if present (extensible config without code changes)
