@@ -113,8 +113,8 @@ AR_SELECTION_CASES = [
     },
     {
         "name": "annual_information_form",
-        "pattern": r"Annual Information Form",
-        "exclude": ["Letter"],
+        "pattern": r"Consolidated Financial Statements",
+        "exclude": ["Concise", "Notice", "Proxy", "Presentation", "Explanatory"],
         "min_pages": 5,
         "min_size_bytes": 100_000,
     },
@@ -219,6 +219,7 @@ def fetch_remuneration_report(ticker: str, target_year: int, all_codes: list[str
         page = safe_goto(new_page, context, search_url)
 
         rows = page.locator("table tr").all()
+        rem_candidates = []
         for row in rows:
             cols = row.locator("td").all()
             if len(cols) < 3:
@@ -228,31 +229,47 @@ def fetch_remuneration_report(ticker: str, target_year: int, all_codes: list[str
 
             if re.search(r"Remuneration Report|Remuneration Statement|Director Remuneration|Management Information Circular",
                         headline_text, re.IGNORECASE):
+                if re.search(r"\b(Appendix|Note|Letter|Ancillary)\b", headline_text, re.IGNORECASE):
+                    continue
                 if link_tag.count() > 0:
                     href = link_tag.get_attribute("href")
                     full_url = href if href.startswith("http") else f"https://www.asx.com.au{href}"
+                    # Capture reported file size for disambiguation (prefer larger = actual report)
+                    reported_size = 0
+                    size_match = re.search(r'pages?\s*(\d+(?:\.\d+)?)\s*([KM])B?', headline_text, re.IGNORECASE)
+                    if size_match:
+                        num = float(size_match.group(1))
+                        unit = size_match.group(2).upper()
+                        reported_size = int(num * (1000 if unit == "K" else 1_000_000))
+                    rem_candidates.append({"headline": headline_text, "url": full_url, "reported_size_bytes": reported_size})
 
-                    print(f"    Found remuneration report: {headline_text}")
-                    res = context.request.get(full_url)
-                    if res.ok:
-                        pdf_bytes = res.body()
-                        if not pdf_bytes.startswith(b"%PDF"):
-                            html_text = pdf_bytes.decode("utf-8", errors="ignore")
-                            resolved_url = resolve_pdf_url(html_text)
-                            if resolved_url:
-                                pdf_res = context.request.get(resolved_url)
-                                if pdf_res.ok:
-                                    pdf_bytes = pdf_res.body()
+        # Sort by reported file size descending (prefer larger = full report over voting forms)
+        rem_candidates.sort(key=lambda c: c.get("reported_size_bytes", 0), reverse=True)
 
-                        if pdf_bytes.startswith(b"%PDF"):
-                            fname = f"{ticker}_{target_year}_REMUNERATION.pdf"
-                            fpath = ar_dir / fname
-                            with open(fpath, "wb") as f:
-                                f.write(pdf_bytes)
-                            size_mb = round(len(pdf_bytes) / (1024 * 1024), 2)
-                            print(f"    Saved exceptional report: {fname} ({size_mb} MB)")
-                            page.close()
-                            return True
+        for cand in rem_candidates:
+            headline_text = cand["headline"]
+            full_url = cand["url"]
+            print(f"    Trying remuneration report: {headline_text} ({cand['reported_size_bytes']} bytes reported)")
+            res = context.request.get(full_url)
+            if res.ok:
+                pdf_bytes = res.body()
+                if not pdf_bytes.startswith(b"%PDF"):
+                    html_text = pdf_bytes.decode("utf-8", errors="ignore")
+                    resolved_url = resolve_pdf_url(html_text)
+                    if resolved_url:
+                        pdf_res = context.request.get(resolved_url)
+                        if pdf_res.ok:
+                            pdf_bytes = pdf_res.body()
+
+                if pdf_bytes.startswith(b"%PDF"):
+                    fname = f"{ticker}_{target_year}_REMUNERATION.pdf"
+                    fpath = ar_dir / fname
+                    with open(fpath, "wb") as f:
+                        f.write(pdf_bytes)
+                    size_mb = round(len(pdf_bytes) / (1024 * 1024), 2)
+                    print(f"    Saved exceptional report: {fname} ({size_mb} MB)")
+                    page.close()
+                    return True
         page.close()
 
     print(f"    No separate remuneration report found for {ticker} FY{target_year}")

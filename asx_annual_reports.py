@@ -142,8 +142,8 @@ AR_SELECTION_CASES = [
     },
     {
         "name": "annual_information_form",
-        "pattern": r"Annual Information Form",
-        "exclude": ["Letter"],
+        "pattern": r"Consolidated Financial Statements",
+        "exclude": ["Concise", "Notice", "Proxy", "Presentation", "Explanatory"],
         "min_pages": 5,
         "min_size_bytes": 100_000,
     },
@@ -716,8 +716,8 @@ class ASXDownloaderApp:
                     completed += 1
                     self.task_queue.put(("progress", completed / total_tasks * 100))
 
-                # Exceptional companies: download split remuneration report
-                if code in EXCEPTIONAL_COMPANIES:
+                # Exceptional companies: download split remuneration report (latest year only)
+                if code in EXCEPTIONAL_COMPANIES and year == end_y:
                     exc = EXCEPTIONAL_COMPANIES[code]
                     if exc.get("type") == "split_remuneration":
                         self.task_queue.put(("status", f"{code}: Downloading split remuneration report..."))
@@ -726,14 +726,14 @@ class ASXDownloaderApp:
                             self.task_queue.put(("result", {"code": code, "year": end_y, "type": "REMUNERATION", "status": "success", "path": str(remuneration_saved)}))
 
                 # VI Reports from ASA (for latest year only)
-                if self.download_vi.get() and self.running:
+                if self.download_vi.get() and self.running and year == end_y:
                     self.task_queue.put(("status", f"{code}: Downloading VI/AGM reports from ASA..."))
                     vi_saved = self._download_vi_reports(code, end_y)
                     if vi_saved:
                         self.task_queue.put(("result", {"code": code, "year": end_y, "type": "VI", "status": "success", "path": str(vi_saved)}))
 
                 # Notice of Meeting (NoM) — latest year only
-                if self.download_nom.get() and self.running:
+                if self.download_nom.get() and self.running and year == end_y:
                     self.task_queue.put(("status", f"{code}: Downloading Notice of Meeting (NoM)..."))
                     nom_saved = self._download_nom_report(code, end_y)
                     if nom_saved:
@@ -744,27 +744,37 @@ class ASXDownloaderApp:
     def _download_exceptional_report(self, ticker: str, search_year: int, target_year: int) -> str | None:
         """Download split remuneration report for exceptional companies."""
         announcements = self.client.search_announcements(ticker, search_year)
+        # Collect all candidates first, then sort by reported size (prefer larger = full report)
+        rem_candidates = []
         for ann in announcements:
             headline = ann.get("headline", "")
             if re.search(r"Remuneration Report|Remuneration Statement|Director Remuneration|Management Information Circular",
                         headline, re.IGNORECASE):
-                if re.search(r"\b(Appendix|Note|Letter)\b", headline, re.IGNORECASE):
+                if re.search(r"\b(Appendix|Note|Letter|Ancillary)\b", headline, re.IGNORECASE):
                     continue
                 url = ann.get("url")
                 if not url:
                     continue
-                self._log(f"Exceptional: Downloading remuneration report for {ticker}: {headline}")
-                pdf_bytes = self.client.fetch_pdf_bytes(url)
-                if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
-                    fname = f"{ticker}_{target_year}_REMUNERATION.pdf"
-                    fpath = self.download_dir / fname
-                    try:
-                        fpath.write_bytes(pdf_bytes)
-                        size_mb = round(len(pdf_bytes) / (1024 * 1024), 2)
-                        self._log(f"Exceptional: Saved {fname} ({size_mb} MB)")
-                        return str(fpath)
-                    except Exception as e:
-                        self._log(f"Exceptional: Error saving remuneration report: {e}", "error")
+                rem_candidates.append({"headline": headline, "url": url, "reported_size_bytes": ann.get("reported_size_bytes", 0)})
+
+        # Sort by reported file size descending (prefer larger = full report over voting forms)
+        rem_candidates.sort(key=lambda c: c.get("reported_size_bytes", 0), reverse=True)
+
+        for cand in rem_candidates:
+            headline = cand["headline"]
+            url = cand["url"]
+            self._log(f"Exceptional: Trying remuneration report for {ticker}: {headline} ({cand['reported_size_bytes']} bytes reported)")
+            pdf_bytes = self.client.fetch_pdf_bytes(url)
+            if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
+                fname = f"{ticker}_{target_year}_REMUNERATION.pdf"
+                fpath = self.download_dir / fname
+                try:
+                    fpath.write_bytes(pdf_bytes)
+                    size_mb = round(len(pdf_bytes) / (1024 * 1024), 2)
+                    self._log(f"Exceptional: Saved {fname} ({size_mb} MB)")
+                    return str(fpath)
+                except Exception as e:
+                    self._log(f"Exceptional: Error saving remuneration report: {e}", "error")
         self._log(f"Exceptional: No remuneration report found for {ticker}")
         return None
 
