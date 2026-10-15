@@ -113,7 +113,7 @@ AR_SELECTION_CASES = [
     },
     {
         "name": "annual_information_form",
-        "pattern": r"Consolidated Financial Statements",
+        "pattern": r"Annual Information Form",
         "exclude": ["Concise", "Notice", "Proxy", "Presentation", "Explanatory"],
         "min_pages": 5,
         "min_size_bytes": 100_000,
