@@ -764,6 +764,153 @@ STAGE7_SPECS: tuple[SectionSpec, ...] = (
     ),
 )
 
+STAGE4_FINANCIAL_SPECS: tuple[SectionSpec, ...] = (
+    _FRONT_MATTER,
+    SectionSpec(
+        key="financial_review",
+        label="Financial review and operating performance",
+        keywords=[
+            "financial review", "operating and financial review", "operating review",
+            "financial performance", "results overview", "performance summary",
+            "review of operations", "operating performance",
+        ],
+        priority=TIER_MANDATORY,
+        max_pages=12,
+        radius=1,
+        mandatory=True,
+    ),
+    SectionSpec(
+        key="five_year_summary",
+        label="Five-year financial summary table",
+        keywords=[
+            "five year financial", "5 year financial", "five year summary",
+            "5-year summary", "key financial data", "financial highlights",
+            "financial history", "financial summary", "performance history",
+            "summary of financial results", "statutory performance",
+        ],
+        priority=TIER_MANDATORY,
+        max_pages=8,
+        radius=1,
+        mandatory=True,
+    ),
+    SectionSpec(
+        key="income_statement",
+        label="Income statement and earnings per share",
+        keywords=[
+            "income statement", "statement of financial performance",
+            "profit and loss", "earnings per share", "eps", "basic earnings",
+            "diluted earnings", "npat", "net profit", "underlying profit",
+        ],
+        priority=TIER_HIGH,
+        max_pages=8,
+        radius=1,
+    ),
+    SectionSpec(
+        key="balance_sheet",
+        label="Balance sheet and financial position",
+        keywords=[
+            "statement of financial position", "balance sheet", "total assets",
+            "net assets", "shareholders equity", "return on equity", "roe",
+            "return on capital employed", "roce", "capital employed",
+        ],
+        priority=TIER_HIGH,
+        max_pages=8,
+        radius=1,
+    ),
+    SectionSpec(
+        key="shareholder_returns",
+        label="Shareholder returns and dividend history",
+        keywords=[
+            "dividend", "total shareholder return", "tsr", "share price",
+            "dividend history", "dividend per share", "dividend payout",
+            "franking", "capital return",
+        ],
+        priority=TIER_HIGH,
+        max_pages=6,
+        radius=1,
+    ),
+)
+
+STAGE4_REMUNERATION_SPECS: tuple[SectionSpec, ...] = (
+    _FRONT_MATTER,
+    SectionSpec(
+        key="rem_report",
+        label="Statutory remuneration report",
+        keywords=[
+            "statutory remuneration report", "remuneration report",
+            "remuneration and employees", "remuneration policy",
+        ],
+        priority=TIER_MANDATORY,
+        max_pages=20,
+        radius=1,
+        mandatory=True,
+    ),
+    SectionSpec(
+        key="kmp_pay_table",
+        label="Statutory key management personnel pay table",
+        keywords=[
+            "key management personnel", "kmp", "statutory key management",
+            "short term post-employment benefits", "post-employment benefits",
+            "remuneration of key management", "executive remuneration table",
+        ],
+        priority=TIER_MANDATORY,
+        max_pages=10,
+        radius=1,
+        mandatory=True,
+    ),
+    SectionSpec(
+        key="realised_pay",
+        label="Realised remuneration and actual pay received",
+        keywords=[
+            "actual remuneration", "actual and maximum", "percentage of maximum",
+            "remuneration actually received", "actually received",
+            "realised remuneration", "realised pay", "realized remuneration",
+            "target remuneration", "actual pay received", "remuneration actually",
+            "awarded remuneration", "awarded pay", "take-home pay", "take home pay",
+            "awarded profit share", "total awarded remuneration",
+        ],
+        priority=TIER_MANDATORY,
+        max_pages=10,
+        radius=1,
+        mandatory=True,
+    ),
+    SectionSpec(
+        key="malus_clawback",
+        label="Malus and clawback provisions",
+        keywords=[
+            "malus", "clawback", "claw-back", "claw back",
+        ],
+        priority=TIER_MANDATORY,
+        max_pages=6,
+        radius=1,
+        mandatory=True,
+    ),
+    SectionSpec(
+        key="sti_detail",
+        label="Short-term incentive design and outcomes",
+        keywords=[
+            "short-term incentive", "short term incentive", "sti",
+            "annual incentive", "performance against targets", "scorecard",
+            "profit share",
+        ],
+        priority=TIER_HIGH,
+        max_pages=8,
+        radius=1,
+    ),
+    SectionSpec(
+        key="lti_detail",
+        label="Long-term incentive design, hurdles and outcomes",
+        keywords=[
+            "long-term incentive", "long term incentive", "lti",
+            "performance rights", "performance conditions", "hurdles",
+            "vesting conditions", "equity incentive",
+        ],
+        priority=TIER_HIGH,
+        max_pages=8,
+        radius=1,
+    ),
+)
+
 STAGE9_SPECS: tuple[SectionSpec, ...] = (
     _FRONT_MATTER,
     SectionSpec(
@@ -798,6 +945,11 @@ STAGE9_SPECS: tuple[SectionSpec, ...] = (
             "board composition", "board skills", "board diversity", "our board",
             "board effectiveness", "skills matrix", "diversity policy",
             "board diversity policy", "lead independent director",
+            # Issuers that do not use the ASA's wording still publish the same
+            # content: AMP's FY2024 report has a "diversity profile" table and
+            # describes "the mix of skills and experience" on the board, and
+            # neither phrase contains any of the words above.
+            "diversity profile", "skills and experience",
         ],
         priority=TIER_MANDATORY,
         max_pages=12,
@@ -901,9 +1053,69 @@ STAGE6_SPECS: tuple[SectionSpec, ...] = (
     ),
 )
 
+# NoM (Notice of Meeting) retrieval specs for remuneration content
+# NoMs are typically 15-25 pages; the remuneration resolution and explanatory
+# notes are often near the end. These specs target the key sections.
+NOM_SPECS: tuple[SectionSpec, ...] = (
+    SectionSpec(
+        key="nom_rem_report",
+        label="Remuneration report resolution and explanatory notes",
+        keywords=[
+            "remuneration report", "adoption of remuneration report",
+            "remuneration resolution", "say on pay", "remuneration statement",
+            "director remuneration", "executive remuneration",
+        ],
+        priority=TIER_MANDATORY,
+        max_pages=12,
+        radius=1,
+        mandatory=True,
+    ),
+    SectionSpec(
+        key="nom_kmp_pay",
+        label="KMP/CEO pay tables and realised remuneration in NoM",
+        keywords=[
+            "key management personnel", "kmp", "chief executive officer",
+            "ceo remuneration", "realised remuneration", "actual remuneration",
+            "remuneration actually received", "take-home pay", "take home pay",
+            "awarded remuneration", "awarded pay", "profit share",
+            "short-term incentive", "sti", "long-term incentive", "lti",
+            "performance rights", "vesting", "equity grant",
+        ],
+        priority=TIER_MANDATORY,
+        max_pages=10,
+        radius=1,
+        mandatory=True,
+    ),
+    SectionSpec(
+        key="nom_service_agreements",
+        label="Service agreements and termination provisions",
+        keywords=[
+            "service agreement", "employment agreement", "contract of employment",
+            "termination", "notice period", "severance", "malus", "clawback",
+            "restraint", "non-compete",
+        ],
+        priority=TIER_HIGH,
+        max_pages=8,
+        radius=1,
+    ),
+    SectionSpec(
+        key="nom_equity_grants",
+        label="Equity grants, options and performance rights in NoM",
+        keywords=[
+            "grant of performance rights", "grant of options", "equity grant",
+            "lti grant", "performance rights", "share rights", "options",
+            "allocation", "face value", "fair value", "exercise price",
+        ],
+        priority=TIER_HIGH,
+        max_pages=8,
+        radius=1,
+    ),
+)
+
 STAGE_SPECS: dict[str, tuple[SectionSpec, ...]] = {
     "stage5": STAGE5_SPECS,
     "stage6": STAGE6_SPECS,
     "stage7": STAGE7_SPECS,
     "stage9": STAGE9_SPECS,
+    "nom": NOM_SPECS,
 }

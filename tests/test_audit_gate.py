@@ -11,7 +11,7 @@ force.
 import sys
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\jurok\VI_Reports1")
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from stage7_audit import _audit_passes  # noqa: E402

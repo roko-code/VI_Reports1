@@ -7,7 +7,7 @@ helpers here are what can regress silently, so they are pinned.
 import sys
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\jurok\VI_Reports1")
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import share_prices as sp  # noqa: E402
@@ -50,6 +50,24 @@ check("2022 TSR = 106%", tsr.get(2022) == 106.0, str(tsr))
 check("2023 TSR = -14.73%", tsr.get(2023) == -14.73, str(tsr))
 check("2024 (missing close) -> None", tsr.get(2024) is None, str(tsr))
 check("2025 (prev close None) -> None", tsr.get(2025) is None, str(tsr))
+
+print()
+print("=" * 80)
+print("3b. simple TSR including dividends paid")
+print("=" * 80)
+# A total shareholder return includes the dividends received over the year.
+# Issuers define TSR that way themselves - AMP's 2025 annual report (p.173)
+# defines it as "the changes in market value of AMP shares, plus the value of
+# any dividends paid and capital returns".
+closes = {2021: 1.01, 2022: 1.31, 2023: 0.93, 2024: 1.59, 2025: 1.82}
+paid = {2022: 0.0, 2023: 0.05, 2024: 0.04, 2025: 0.03}
+tsr = sp.compute_simple_tsr(closes, paid)
+check("2022 price return, no dividend", tsr.get(2022) == 29.70, str(tsr))
+check("2023 includes 5c dividend", tsr.get(2023) == -25.19, str(tsr))
+check("2024 includes 4c dividend", tsr.get(2024) == 75.27, str(tsr))
+check("2025 includes 3c dividend", tsr.get(2025) == 16.35, str(tsr))
+check("no dividends -> price return",
+      sp.compute_simple_tsr(closes) == sp.compute_simple_tsr(closes, None))
 
 print()
 print("=" * 80)

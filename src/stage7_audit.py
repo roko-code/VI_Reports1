@@ -20,6 +20,7 @@ from logging_utils import write_supporting_json, write_supporting_text
 from news_search_results import load_news_block, has_news_results
 from llm_json import parse_llm_json
 from llm_config import audit_models
+from rate_limiter import get_bucket, rate_limited_call, RateLimitExceeded
 
 load_dotenv(find_dotenv())
 
@@ -32,29 +33,33 @@ AUDIT_PRIMARY_MODEL, AUDIT_FALLBACK_MODEL = audit_models()
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
 
-# Token bucket
-class TokenBucket:
-    def __init__(self, rate_per_minute: int = 18):
-        self.rate = rate_per_minute / 60.0
-        self.tokens = rate_per_minute
-        self.last = time.time()
-    
-    def take(self):
-        now = time.time()
-        elapsed = now - self.last
-        if elapsed > 0:
-            self.tokens = min(self.rate * elapsed + self.tokens, self.rate * 60)
-        if self.tokens >= 1:
-            self.tokens -= 1
-            self.last = now
-            return 0
-        wait = (1 - self.tokens) / self.rate
-        self.tokens = 0
-        self.last = now
-        time.sleep(wait)
-        return wait
+# Shared rate limiter bucket for Stage 7 Audit
+_rate_bucket = get_bucket("stage7_audit")
 
-_token_bucket = TokenBucket(20)
+
+def _count_uncertain_rows(text: str) -> int:
+    """Assessment rows whose result is Uncertain.
+
+    The remuneration assessment is a set of markdown tables with a result
+    cell.  Only a row whose result cell says Uncertain counts: a document
+    that mentions the word in its completeness checklist, or in prose
+    explaining one Uncertain row, is not reporting many Uncertain rows.
+    """
+    if not text:
+        return 0
+    count = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        # A result cell states the outcome on its own, e.g. "**Uncertain.**".
+        result = cells[1].strip("* ").strip()
+        if result.lower().startswith("uncertain"):
+            count += 1
+    return count
 
 
 def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
@@ -81,7 +86,22 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
     elif not active_nom and archived_nom:
         issues.append({"check": "NoM JSON location", "status": "WARN", "detail": "NoM JSON only in archived directory - may need restoration for downstream stages"})
     else:
-        issues.append({"check": "NoM JSON location", "status": "WARN", "detail": "NoM JSON exists in both locations - possible duplicate processing"})
+        # The archive is a copy of the active extraction, so identical files in
+        # both places are the intended state.  Only differing content means
+        # the two have diverged and one of them is stale.
+        diverged = []
+        for active_path in sorted(nom_dir.glob("*.json")):
+            archived_path = nom_archived / active_path.name
+            if not archived_path.exists():
+                continue
+            if active_path.read_bytes() != archived_path.read_bytes():
+                diverged.append(active_path.name)
+        if diverged:
+            issues.append({"check": "NoM JSON location", "status": "WARN",
+                           "detail": f"NoM JSON differs between the active and archived copies ({', '.join(diverged)}) - one copy is stale"})
+        else:
+            issues.append({"check": "NoM JSON location", "status": "INFO",
+                           "detail": "NoM JSON is present in the active directory with an identical archived copy"})
     
     if nom_json_files:
         try:
@@ -118,22 +138,34 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
             extraction_status = perf_data.get("extraction_status", "unknown")
             years = perf_data.get("years", {})
             ceo_pay = perf_data.get("ceo_realised_pay", {})
+            ceo_statutory_pay = perf_data.get("ceo_statutory_pay", {})
             
             if extraction_status == "failed":
                 issues.append({"check": "Performance extraction", "status": "FAIL", "detail": "Extraction status is 'failed'"})
             elif extraction_status == "partial":
-                issues.append({"check": "Performance extraction", "status": "WARN", "detail": f"Extraction is partial: {len(years)} years, {len(ceo_pay)} CEO pay years"})
+                issues.append({"check": "Performance extraction", "status": "WARN", "detail": f"Extraction is partial: {len(years)} years, {len(ceo_pay)} CEO realised pay years, {len(ceo_statutory_pay)} CEO statutory pay years"})
             
-            # Check CEO pay values are in reasonable range ($1M-$50M)
+            # Check CEO realised pay values are in reasonable range ($1M-$50M)
             for fy, pay in ceo_pay.items():
                 val = pay.get("value_m", 0)
                 if isinstance(val, (int, float)):
                     if val > 1000:
-                        issues.append({"check": "CEO pay range", "status": "FAIL", 
-                                      "detail": f"FY{fy} CEO pay ${val:.1f}m suspiciously high (off by 1000x)"})
+                        issues.append({"check": "CEO realised pay range", "status": "FAIL", 
+                                      "detail": f"FY{fy} CEO realised pay ${val:.1f}m suspiciously high (off by 1000x)"})
                     elif val > 100:
-                        issues.append({"check": "CEO pay range", "status": "WARN",
-                                      "detail": f"FY{fy} CEO pay ${val:.1f}m above expected range"})
+                        issues.append({"check": "CEO realised pay range", "status": "WARN",
+                                      "detail": f"FY{fy} CEO realised pay ${val:.1f}m above expected range"})
+            
+            # Check CEO statutory pay values are in reasonable range ($1M-$50M)
+            for fy, pay in ceo_statutory_pay.items():
+                val = pay.get("value_m", 0)
+                if isinstance(val, (int, float)):
+                    if val > 1000:
+                        issues.append({"check": "CEO statutory pay range", "status": "FAIL", 
+                                      "detail": f"FY{fy} CEO statutory pay ${val:.1f}m suspiciously high (off by 1000x)"})
+                    elif val > 100:
+                        issues.append({"check": "CEO statutory pay range", "status": "WARN",
+                                      "detail": f"FY{fy} CEO statutory pay ${val:.1f}m above expected range"})
             
             # Check financial metric unit consistency across years
             financial_metrics = ["npat", "underlying_npat", "revenue", "net_assets"]
@@ -145,10 +177,16 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
                         values.append((fy, val))
                 
                 if len(values) >= 2:
-                    # Check for unit inconsistencies: values spanning >3 orders of magnitude
-                    vals_only = [v[1] for v in values]
-                    max_val = max(vals_only)
-                    min_val = min(vals_only) if min(vals_only) > 0 else 1
+                    # Check for unit inconsistencies: values spanning >3 orders
+                    # of magnitude.  The scale of a figure is its magnitude, so
+                    # a loss year is compared on its absolute value - AMP's
+                    # FY2021 statutory loss of -252 against a FY2022 profit of
+                    # 387 is one unit, not a 387x mismatch.
+                    magnitudes = [abs(v[1]) for v in values if v[1] != 0]
+                    if not magnitudes:
+                        continue
+                    max_val = max(magnitudes)
+                    min_val = min(magnitudes)
                     if max_val / min_val > 1000:
                         issues.append({
                             "check": "Metric unit consistency",
@@ -157,7 +195,7 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
                         })
                     elif max_val / min_val > 100:
                         issues.append({
-                            "check": "Metric unit consistency", 
+                            "check": "Metric unit consistency",
                             "status": "WARN",
                             "detail": f"{metric} values vary widely across years (range: {min_val:.1f} to {max_val:.1f}) - possible unit issue. Values: {dict(values)}"
                         })
@@ -194,11 +232,20 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
                 # Check if the assessment has content
                 raw_content = rem_data.get("raw_content", "")
                 if raw_content:
-                    # Count uncertain results by looking for common patterns
-                    uncertain_count = raw_content.lower().count("unc")
-                    if uncertain_count > 5:
-                        issues.append({"check": "Remuneration assessment", "status": "WARN", 
-                                    "detail": f"Many 'Uncertain' results detected in markdown - source docs may be insufficient"})
+                    # Count the rows whose RESULT is Uncertain.  Counting the
+                    # word anywhere in the document counts the completeness
+                    # checklist ("marked Uncertain with a stated reason") and
+                    # any prose that mentions the word, so an assessment with
+                    # a single Uncertain row was reported as having many.
+                    uncertain_count = _count_uncertain_rows(raw_content)
+                    if uncertain_count > 2:
+                        issues.append({"check": "Remuneration assessment", "status": "WARN",
+                                    "detail": f"{uncertain_count} assessment rows return 'Uncertain' - source docs may be insufficient"})
+            if rem_assess_md:
+                uncertain_md = _count_uncertain_rows(rem_assess_md[0].read_text(encoding="utf-8"))
+                if uncertain_md > 2:
+                    issues.append({"check": "Remuneration assessment", "status": "WARN",
+                                "detail": f"{uncertain_md} assessment rows in the markdown return 'Uncertain'"})
         except Exception as e:
             issues.append({"check": "Remuneration assessment", "status": "WARN", "detail": f"Cannot parse JSON: {e}"})
     
@@ -233,8 +280,27 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
     vi_dir = workspace_dir / "vi_reports"
     vi_files = list(vi_dir.glob("*_VIR.pdf")) if vi_dir.exists() else []
     if len(vi_files) < expected_years:
-        issues.append({"check": "VI Reports", "status": "WARN", 
-                      "detail": f"Only {len(vi_files)}/{expected_years} VI reports present"})
+        # A year the ASA never published is a source limitation, not a
+        # pipeline defect: Stage 3 records the years it could not find on the
+        # ASA site, so those years are reported as information.
+        unpublished = set()
+        summary_path = (workspace_dir / "supporting_data" / "stage3_vi_reports"
+                        / "vi_reports_summary.json")
+        if summary_path.exists():
+            try:
+                with open(summary_path, encoding="utf-8") as f:
+                    summary = json.load(f)
+                unpublished = {int(y) for y in summary.get("missing_years", [])}
+            except (json.JSONDecodeError, OSError, ValueError):
+                unpublished = set()
+        detail = f"Only {len(vi_files)}/{expected_years} VI reports present"
+        if unpublished:
+            years = ", ".join(str(y) for y in sorted(unpublished))
+            issues.append({"check": "VI Reports", "status": "INFO",
+                           "detail": f"{detail}. The ASA publishes no Voting Intentions report "
+                                     f"for {years}, so that year was not available to download"})
+        else:
+            issues.append({"check": "VI Reports", "status": "WARN", "detail": detail})
     
     # Check 8: Pipeline state consistency
     state_path = workspace_dir / "state.json"
@@ -279,11 +345,11 @@ def _build_audit_summary(workspace_dir: Path, auto_issues: List[Dict], logger=No
     # Automated issues
     if auto_issues:
         summary_parts.append("\n## Automated Validation Issues")
-        by_status = {"FAIL": [], "WARN": [], "PASS": []}
+        by_status = {"FAIL": [], "WARN": [], "PASS": [], "INFO": []}
         for issue in auto_issues:
             by_status.setdefault(issue["status"], []).append(issue)
-        
-        for status in ["FAIL", "WARN", "PASS"]:
+
+        for status in ["FAIL", "WARN", "INFO", "PASS"]:
             for issue in by_status.get(status, []):
                 summary_parts.append(f"- [{issue['status']}] {issue['check']}: {issue['detail']}")
     
@@ -294,6 +360,7 @@ def _build_audit_summary(workspace_dir: Path, auto_issues: List[Dict], logger=No
             perf_data = json.load(f)
         years = perf_data.get("years", {})
         ceo_pay = perf_data.get("ceo_realised_pay", {})
+        ceo_statutory_pay = perf_data.get("ceo_statutory_pay", {})
         
         summary_parts.append("\n## Performance Summary")
         summary_parts.append(f"- Extraction status: {perf_data.get('extraction_status', 'unknown')}")
@@ -305,6 +372,10 @@ def _build_audit_summary(workspace_dir: Path, auto_issues: List[Dict], logger=No
         
         summary_parts.append("\n## CEO Realised Pay")
         for fy, pay in sorted(ceo_pay.items()):
+            summary_parts.append(f"- FY{fy}: ${pay.get('value_m', 0):.2f}m ({pay.get('source_method')})")
+        
+        summary_parts.append("\n## CEO Statutory Pay")
+        for fy, pay in sorted(ceo_statutory_pay.items()):
             summary_parts.append(f"- FY{fy}: ${pay.get('value_m', 0):.2f}m ({pay.get('source_method')})")
     
     return "\n".join(summary_parts)
@@ -376,6 +447,16 @@ it, do not list it as a missing document, and do not raise its (non-)use as a
 data-quality issue. Use it only to sanity-check whether an assessment's factual
 claims are consistent with publicly reported events.
 
+An automated validation issue marked [INFO] records a fact about the source
+material, not a defect in the pipeline - for example a document the publisher
+never issued. Do not raise [INFO] items as issues, do not list them as
+missing documents, and do not let them reduce the data quality score.
+
+This audit covers the pipeline up to and including the resolution assessments.
+Text summaries, board questions and the rendered Word report are produced
+afterwards, so their pipeline flags read False here by design. Do not list
+them as missing documents and do not treat them as gaps.
+
 Output as JSON:
 {
   "overall_assessment": "PASS|PARTIAL|FAIL",
@@ -425,16 +506,23 @@ Output as JSON:
             )
 
         # Step 3: Send to LLM for qualitative review
-        _token_bucket.take()
         
-        try:
-            response = client.chat.completions.create(
+        def make_primary_call():
+            return client.chat.completions.create(
                 model=AUDIT_PRIMARY_MODEL,
                 messages=[
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": audit_user_content}
                 ],
                 timeout=120.0
+            )
+        
+        try:
+            response = rate_limited_call(
+                bucket_name="stage7_audit",
+                call_fn=make_primary_call,
+                max_retries=3,
+                logger=logger
             )
             
             content = response.choices[0].message.content
@@ -445,15 +533,28 @@ Output as JSON:
                     audit_result = {"error": f"LLM JSON parse failed: {ve}"}
             else:
                 audit_result = {"error": "LLM returned empty response"}
+        except RateLimitExceeded as rle:
+            if logger:
+                logger.error(f"Daily rate limit exceeded: {rle}")
+            audit_result = {"error": f"Rate limit exceeded: {rle}", "auto_issues": auto_issues}
         except Exception as e:
             if logger:
                 logger.warning(f"LLM audit failed: {e}")
-            try:
-                response = client.chat.completions.create(
+            # Try fallback
+            def make_fallback_call():
+                return client.chat.completions.create(
                     model=AUDIT_FALLBACK_MODEL,
                     messages=[{"role": "system", "content": prompt},
                             {"role": "user", "content": audit_user_content}],
                     timeout=120.0
+                )
+            
+            try:
+                response = rate_limited_call(
+                    bucket_name="stage7_audit",
+                    call_fn=make_fallback_call,
+                    max_retries=3,
+                    logger=logger
                 )
                 content = response.choices[0].message.content
                 if content:
@@ -463,6 +564,10 @@ Output as JSON:
                         audit_result = {"error": f"Fallback LLM JSON parse failed: {ve}"}
                 else:
                     audit_result = {"error": "Fallback LLM returned empty response"}
+            except RateLimitExceeded as rle:
+                if logger:
+                    logger.error(f"Fallback model also rate limited: {rle}")
+                audit_result = {"error": f"Both models rate limited: {rle}", "auto_issues": auto_issues}
             except Exception as e2:
                 audit_result = {"error": f"Both models failed: {e}, {e2}", "auto_issues": auto_issues}
         

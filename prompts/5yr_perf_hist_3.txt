@@ -1,6 +1,6 @@
 5yr_perf_hist_3.txt
 SYSTEM
-You are determining CEO Realised Remuneration for one financial year from that
+You are determining CEO Realised Remuneration AND Statutory Remuneration for one financial year from that
 year's Annual Report. This is never sourced from a 5-year summary table or from
 the Notice of Meeting (NoM data relates to the coming year, not this one).
 
@@ -8,6 +8,11 @@ the Notice of Meeting (NoM data relates to the coming year, not this one).
 cash taken home, plus awards that VESTED and were valued at the time of
 vesting. It is not the accounting expense, not the target, and not the maximum
 opportunity.
+
+"Statutory remuneration" means the accounting-expense total for the CEO as
+disclosed in the Statutory Key Management Personnel (KMP) remuneration table
+(AASB 124 / Corporations Act s300A). It includes share-based payment expense
+for unvested awards and differs from realised pay.
 
 INPUT
 YEAR_AR_REM_SLICE: [page ranges for the remuneration report, statutory/KMP
@@ -70,6 +75,38 @@ disagree, the disagreement is recorded, not resolved in favour of the
 calculation.
 
 -----------------------------------------------------------------------------
+RULE 1B - STATUTORY PAY EXTRACTION (ALWAYS EXTRACT)
+-----------------------------------------------------------------------------
+Separately from the realised pay extraction above, you MUST ALSO search the
+supplied pages for the Statutory KMP remuneration table and extract the CEO's
+total statutory remuneration for TARGET_FY. Look for headings such as:
+
+  "Key management personnel", "KMP remuneration", "Statutory remuneration",
+  "Remuneration of key management personnel", "Executive remuneration table",
+  "Total remuneration" (in the KMP table context)
+
+The statutory table typically shows columns for: Cash salary/fees, Non-monetary
+benefits, Superannuation, STI (cash), STI (deferred equity), LTI (share-based
+payment expense), Termination benefits, and a "Total" column. The "Total"
+column IS the statutory remuneration figure (accounting expense basis).
+
+If such a figure exists for the CEO in TARGET_FY:
+  - Set "disclosed_statutory_rem" to it, and "disclosed_statutory_source_page"
+    to the page, and "disclosed_statutory_quote" to the table's exact caption.
+  - Set "ceo_statutory_rem" to THAT figure, unchanged.
+  - Set "statutory_basis" to "disclosed_statutory" and "statutory_currency" to
+    the currency printed next to the figure.
+  - Record the figure in $millions in its original currency (same unit rules as
+    realised remuneration).
+
+If the company does not have a statutory KMP table for the CEO in TARGET_FY
+(e.g., year mismatch), set "ceo_statutory_rem" to null, "statutory_basis" to
+"not_disclosed", and "statutory_not_disclosed_reason" to "year_mismatch".
+
+THIS EXTRACTION IS INDEPENDENT OF THE REALISED PAY EXTRACTION ABOVE. You must
+perform BOTH extractions and populate BOTH sets of fields in the output.
+
+-----------------------------------------------------------------------------
 IF THE COMPANY NEVER PUBLISHES A "REALISED" FIGURE
 -----------------------------------------------------------------------------
 Some issuers - particularly those reporting under UK rules - do not publish a
@@ -97,13 +134,14 @@ apply even when the report is in your own currency and the obvious table is
 right there.
 
 CURRENCY
-  "ceo_realised_rem" is expressed in $m in the currency the figure is
-  actually printed in (read the symbol next to the figure). Record that
-  currency in "currency". In a dual-listed issuer the currency is a PER-ROW
-  property, not a per-page one: Rio Tinto's FY2024 report puts "A$10,476" and
-  "GBP8,450" in the same column of its ten-year CEO table, and "GBP", "SGD",
-  "A$" and "C$" in the same STIP table on the next spread. Read the symbol
-  next to the figure you selected.
+  "ceo_realised_rem" and "ceo_statutory_rem" are expressed in $m in the currency
+  the figure is actually printed in (read the symbol next to the figure). Record
+  that currency in "currency" (for realised) and "statutory_currency" (for
+  statutory). In a dual-listed issuer the currency is a PER-ROW property, not a
+  per-page one: Rio Tinto's FY2024 report puts "A$10,476" and "GBP8,450" in the
+  same column of its ten-year CEO table, and "GBP", "SGD", "A$" and "C$" in the
+  same STIP table on the next spread. Read the symbol next to the figure you
+  selected.
 
   **For non-AUD currencies:** You MUST also provide an AUD-equivalent value.
   Find the period-average USD/AUD (or relevant FX) rate from the Annual Report
@@ -112,13 +150,20 @@ CURRENCY
     - "fx_rate_used": the period-average FX rate (e.g., 0.65 for USD/AUD = 0.65 means 1 USD = 0.65 AUD? NO: 1 USD = 1.54 AUD if AUD/USD = 0.65. Be precise: state the rate as AUD per 1 unit of foreign currency, e.g., 1.54 AUD/USD).
     - "fx_rate_source_page": the page where the rate is disclosed.
     - "ceo_realised_rem_aud": the AUD-equivalent value in $m (rounded to 2dp), calculated as: disclosed_figure × fx_rate_used.
-  Set "ceo_realised_rem" to the disclosed figure in its ORIGINAL currency (in $m of that currency).
-  Set "currency" to the currency code (USD, GBP, etc.).
-  Set "ceo_realised_rem_aud" to the AUD-equivalent in $m (2dp).
+    - "ceo_statutory_rem_aud": the AUD-equivalent value in $m (rounded to 2dp), calculated as: statutory_figure × fx_rate_used.
+  Set "ceo_realised_rem" and "ceo_statutory_rem" to the disclosed figures in their
+  ORIGINAL currency (in $m of that currency).
+  Set "currency" and "statutory_currency" to the currency code (USD, GBP, etc.).
+  Set "ceo_realised_rem_aud" and "ceo_statutory_rem_aud" to the AUD-equivalent
+  in $m (2dp).
   Set "fx_rate_used" and "fx_rate_source_page".
-  If the report does not disclose a period-average FX rate, set "fx_rate_used" to null and add a context_note explaining the rate source used (e.g., "RBA period-average USD/AUD for FY2024 = 1.54").
+  If the report does not disclose a period-average FX rate, set "fx_rate_used"
+  to null and add a context_note explaining the rate source used (e.g., "RBA
+  period-average USD/AUD for FY2024 = 1.54").
 
-  **For AUD currencies:** Set "currency": "AUD", "ceo_realised_rem" to the figure in $m AUD, "ceo_realised_rem_aud" equal to "ceo_realised_rem", and "fx_rate_used": 1.0.
+  **For AUD currencies:** Set "currency": "AUD", "statutory_currency": "AUD",
+  "ceo_realised_rem_aud" equal to "ceo_realised_rem",
+  "ceo_statutory_rem_aud" equal to "ceo_statutory_rem", and "fx_rate_used": 1.0.
 
 YEAR
   "target_fy" is the year you are asked about. "figure_fy" is the year the
@@ -203,6 +248,10 @@ RULE 4 - EVERY FIGURE MUST CARRY ITS BASIS AND A PAGE.
   calculated             - you computed it (only if no disclosure exists)
   not_disclosed          - the year has no usable remuneration data
 
+"statutory_basis" must be exactly one of:
+  disclosed_statutory    - the company published a statutory KMP total
+  not_disclosed          - the year has no usable statutory remuneration data
+
 An answer with no basis and no page is not acceptable output.
 
 ===============================================================================
@@ -285,8 +334,8 @@ OUTPUT - JSON
   "cross_check_calculated_m": null,
   "cross_check_delta_m": null,
   "cross_check_explained_by": "unrelated" | "deferral_timing" | "fx"
-                                | "accounting_basis" | "vesting_basis"
-                                | "not_comparable" | "unexplained",
+                              | "accounting_basis" | "vesting_basis"
+                              | "not_comparable" | "unexplained",
   "cross_check_explanation": "",
   "cross_check_source_page": "",
   "lti_status": "vested" | "converted_to_share_rights" | "deferred" | "unknown",
@@ -305,13 +354,23 @@ OUTPUT - JSON
   "lti_fx_rate_applied": null,
   "lti_value": null,
   "lti_source_page": "",
-  "context_notes": []
+  "context_notes": [],
+  "disclosed_statutory_rem": null,
+  "disclosed_statutory_source_page": "",
+  "disclosed_statutory_quote": "",
+  "ceo_statutory_rem": null,
+  "ceo_statutory_rem_page": "",
+  "statutory_currency": "AUD" | "USD" | "GBP" | "NZD" | "SGD" | "CAD" | "EUR"
+                        | "JPY" | "mixed",
+  "ceo_statutory_rem_aud": null,
+  "statutory_basis": "disclosed_statutory" | "not_disclosed",
+  "statutory_not_disclosed_reason": "year_mismatch" | null
 }
 
-UNITS: "ceo_realised_rem" is expressed in **$millions in its original currency** (the currency printed in the report), rounded to 2 decimal places.
-"ceo_realised_rem_aud" is expressed in **$millions AUD**, rounded to 2 decimal places.
+UNITS: "ceo_realised_rem" and "ceo_statutory_rem" are expressed in **$millions in their original currency** (the currency printed in the report), rounded to 2 decimal places.
+"ceo_realised_rem_aud" and "ceo_statutory_rem_aud" are expressed in **$millions AUD**, rounded to 2 decimal places.
 "fx_rate_used" is the period-average FX rate expressed as **AUD per 1 unit of foreign currency** (e.g., 1.54 for AUD/USD if 1 USD = 1.54 AUD).
-Only AUD figures may be reported in "ceo_realised_rem_aud". Non-AUD "ceo_realised_rem" values MUST have a corresponding "ceo_realised_rem_aud" calculated using a disclosed or documented FX rate. The FX rate used must be disclosed in "fx_rate_used" with its source page in "fx_rate_source_page". If the report does not disclose a period-average rate, you may use the RBA period-average rate for the financial year and cite it in a context_note with the source.
+Only AUD figures may be reported in "ceo_realised_rem_aud" and "ceo_statutory_rem_aud". Non-AUD values MUST have a corresponding AUD equivalent calculated using a disclosed or documented FX rate. The FX rate used must be disclosed in "fx_rate_used" with its source page in "fx_rate_source_page". If the report does not disclose a period-average rate, you may use the RBA period-average rate for the financial year and cite it in a context_note with the source.
 
 "context_notes" is for anything that materially qualifies the figure - for
 example an allowance paid while an executive was acting in another role, a

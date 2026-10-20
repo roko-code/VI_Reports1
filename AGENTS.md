@@ -132,3 +132,46 @@ on a supplied page. And a part-year CEO is a qualifier on a real figure, not a
 reason to withhold one: NAB FY2024's answer is $1.74m with `ceo_served_part_year`
 set, not a non-disclosure.
 
+## Performance table facts (Stage 4)
+
+Four things in the performance table are not what their names suggest, and
+each was wrong in a live AMP FY2026 report before these rules were added.
+
+- **An AR published in year Y covers FY Y-1.** `AMP_2026_AR.pdf` is FY2025.
+  Stage 4 resolves the AR for a fiscal year as publication year + 1 and falls
+  back to the following year when the issuer publishes on a different cycle.
+- **`dividend` is the dividend DECLARED for the FY.** A five-year summary
+  reports dividends *paid during* the year, which is a different figure
+  (AMP FY2025: 4.0c declared, 3.0c paid). `dividend` is taken from the
+  individual AR's Appendix 4E; `dividend_paid` keeps the summary row and is
+  what the TSR uses.
+- **Simple TSR is a total shareholder return.** It includes the dividends paid
+  during the year, because that is how issuers define TSR in their own
+  glossary (AMP FY2025 AR p.173). A price return understates it by the
+  dividend yield. `share_prices.compute_simple_tsr(closes, dividends)`.
+- **EPS is read from the column header, not from the model.** An AR prints the
+  current year and the comparative side by side; AMP FY2024 was reported as
+  9.3c, which is FY2023's number. `src/eps_extraction.py` keys the value to
+  the year column and wins over the model's reading.
+
+`src/remuneration_framework.py` does the same for CEO pay and the remuneration
+framework: it reads the realised-pay and STI-outcomes tables and the
+percentage-of-fixed-remuneration rules out of the AR, and rejects the result
+unless it reconciles with the remuneration mix the issuer publishes. Stage 4
+uses it to fill CEO realised and statutory pay when the model call is dropped
+or answers "not disclosed".
+
+Tests: `tests/test_eps_extraction.py`, `tests/test_remuneration_framework.py`,
+`tests/test_share_prices.py`.
+
+### Running Stage 4
+```bash
+python run_stage4_fresh.py AMP 2026
+```
+Stage 4 is checkpointed, so a re-run resumes from the last completed model
+call. The checkpoint database lives under the workspace's
+`supporting_data/stage4_performance_table/`, so the supporting data directory
+must be supplied - invoking `performance_table.py` directly skips
+checkpointing.
+
+

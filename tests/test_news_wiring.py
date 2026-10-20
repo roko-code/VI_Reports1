@@ -15,7 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\jurok\VI_Reports1")
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from news_search_results import load_news_block, has_news_results  # noqa: E402

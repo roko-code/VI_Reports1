@@ -139,14 +139,32 @@ def get_fy_closes(ticker: str, fy_end_month: int, fy_end_day: int,
     return result
 
 
-def compute_simple_tsr(closes: dict[int, Optional[float]]) -> dict[int, Optional[float]]:
-    """Simple TSR (%) for years that have both a start and end close."""
+def compute_simple_tsr(closes: dict[int, Optional[float]],
+                       dividends: Optional[dict[int, float]] = None) -> dict[int, Optional[float]]:
+    """Simple TSR (%) for years that have both a start and end close.
+
+    ``dividends`` optionally maps a year to the dividends *paid during* that
+    year, in dollars per share.  A total shareholder return includes the
+    dividends received over the year; a price return does not.  Issuers
+    define TSR that way in their own glossary - AMP's 2025 annual report
+    (p.173) defines it as "the changes in market value of AMP shares, plus
+    the value of any dividends paid and capital returns" - so a TSR computed
+    from prices alone understates the return by the dividend yield.
+
+    Callers that omit ``dividends`` get a price return, which is what this
+    function did before dividends were included.
+    """
     years = sorted(closes)
     tsr: dict[int, Optional[float]] = {}
     for i in range(1, len(years)):
         prev, cur = closes[years[i - 1]], closes[years[i]]
         if prev and cur:
-            tsr[years[i]] = round((cur / prev - 1.0) * 100.0, 2)
+            div = 0.0
+            if dividends:
+                raw = dividends.get(years[i])
+                if raw:
+                    div = float(raw)
+            tsr[years[i]] = round(((cur - prev + div) / prev) * 100.0, 2)
         else:
             tsr[years[i]] = None
     return tsr

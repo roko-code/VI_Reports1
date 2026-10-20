@@ -13,8 +13,11 @@ from currency_anchor import (anchored_figures, contains_aud_million,
                             near_miss_currencies, reporting_currency_for)
 from disclosure_check import disclosed_realised_figures
 from ar_text_cache import get_ar_pages
+from ar_retrieval import (build_context, write_manifest,
+                         STAGE4_FINANCIAL_SPECS, STAGE4_REMUNERATION_SPECS)
 from pipeline_db import init_run_db
 from llm_config import performance_models
+from rate_limiter import get_bucket, rate_limited_call, RateLimitExceeded
 
 load_dotenv(find_dotenv())
 
@@ -24,6 +27,9 @@ if not API_KEY:
 
 PERFORMANCE_MODEL, PERFORMANCE_FALLBACK_MODEL = performance_models()
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Shared rate limiter bucket for Stage 4
+_rate_bucket = get_bucket("stage4_performance_table")
 
 # JSON Schemas for LLM response validation
 PROMPT_1A_SCHEMA = {
@@ -50,15 +56,23 @@ PROMPT_1A_SCHEMA = {
                         "share_price_restatement_note": {"type": "string"},
                         "dividend": {"type": ["number", "string", "null"]},
                         "dividend_source_page": {"type": ["integer", "string", "null"]},
+                        "dividend_paid": {"type": ["number", "string", "null"]},
+                        "dividend_paid_source_page": {"type": ["integer", "string", "null"]},
                         "simple_tsr": {"type": ["number", "string", "null"]},
                         "simple_tsr_source_page": {"type": ["integer", "string", "null"]},
                         "tsr_mismatch": {"type": "boolean"},
                         "eps": {"type": ["number", "string", "null"]},
                         "eps_source_page": {"type": ["integer", "string", "null"]},
+                        "underlying_eps": {"type": ["number", "string", "null"]},
+                        "underlying_eps_source_page": {"type": ["integer", "string", "null"]},
                         "revenue": {"type": ["number", "string", "null"]},
+                        "revenue_source_page": {"type": ["integer", "string", "null"]},
                         "net_assets": {"type": ["number", "string", "null"]},
+                        "net_assets_source_page": {"type": ["integer", "string", "null"]},
                         "roe": {"type": ["number", "string", "null"]},
+                        "roe_source_page": {"type": ["integer", "string", "null"]},
                         "roce": {"type": ["number", "string", "null"]},
+                        "roce_source_page": {"type": ["integer", "string", "null"]},
                         "repeated_value_flag": {"type": "boolean"},
                         "extracted_from_latest_ar": {"type": "boolean"},
                         "missing_metrics": {"type": "array", "items": {"type": "string"}}
@@ -115,15 +129,23 @@ PROMPT_2_SCHEMA = {
                         "share_price_restatement_note": {"type": "string"},
                         "dividend": {"type": ["number", "string", "null"]},
                         "dividend_source_page": {"type": ["integer", "string", "null"]},
+                        "dividend_paid": {"type": ["number", "string", "null"]},
+                        "dividend_paid_source_page": {"type": ["integer", "string", "null"]},
                         "simple_tsr": {"type": ["number", "string", "null"]},
                         "simple_tsr_source_page": {"type": ["integer", "string", "null"]},
                         "tsr_mismatch": {"type": "boolean"},
                         "eps": {"type": ["number", "string", "null"]},
                         "eps_source_page": {"type": ["integer", "string", "null"]},
+                        "underlying_eps": {"type": ["number", "string", "null"]},
+                        "underlying_eps_source_page": {"type": ["integer", "string", "null"]},
                         "revenue": {"type": ["number", "string", "null"]},
+                        "revenue_source_page": {"type": ["integer", "string", "null"]},
                         "net_assets": {"type": ["number", "string", "null"]},
+                        "net_assets_source_page": {"type": ["integer", "string", "null"]},
                         "roe": {"type": ["number", "string", "null"]},
+                        "roe_source_page": {"type": ["integer", "string", "null"]},
                         "roce": {"type": ["number", "string", "null"]},
+                        "roce_source_page": {"type": ["integer", "string", "null"]},
                         "repeated_value_flag": {"type": "boolean"},
                         "extracted_from_latest_ar": {"type": "boolean"},
                         "missing_metrics": {"type": "array", "items": {"type": "string"}}
@@ -182,8 +204,17 @@ PROMPT_3_SCHEMA = {
         "lti_value": {"type": ["number", "string", "null"]},
         "lti_source_page": {"type": ["integer", "string", "null"]},
         "context_notes": {"type": "array", "items": {"type": "string"}},
+        "disclosed_statutory_rem": {"type": ["number", "string", "null"]},
+        "disclosed_statutory_source_page": {"type": ["integer", "string", "null"]},
+        "disclosed_statutory_quote": {"type": "string"},
+        "ceo_statutory_rem": {"type": ["number", "string", "null"]},
+        "ceo_statutory_rem_page": {"type": ["integer", "string", "null"]},
+        "statutory_currency": {"type": ["string", "null"]},
+        "ceo_statutory_rem_aud": {"type": ["number", "string", "null"]},
+        "statutory_basis": {"type": ["string", "null"], "enum": ["disclosed_statutory", "not_disclosed", None]},
+        "statutory_not_disclosed_reason": {"type": ["string", "null"], "enum": [None, "year_mismatch"]},
     },
-    "required": ["ceo_name", "target_fy", "source_method", "ceo_realised_rem"]
+    "required": ["ceo_name", "target_fy", "source_method", "ceo_realised_rem", "ceo_statutory_rem"]
 }
 
 PROMPT_4_SCHEMA = {
@@ -203,29 +234,6 @@ SCHEMA_MAP = {
     "prompt_4": "PROMPT_4_SCHEMA",
 }
 
-# Token bucket rate limiter: 20 RPM = 3s between calls
-class TokenBucket:
-    def __init__(self, rate_per_minute: int = 18):
-        self.rate = rate_per_minute / 60.0  # requests per second
-        self.tokens = rate_per_minute
-        self.last = time.time()
-    
-    def take(self):
-        now = time.time()
-        elapsed = now - self.last
-        if elapsed > 0:
-            self.tokens = min(self.rate * elapsed + self.tokens, self.rate * 60)
-        if self.tokens >= 1:
-            self.tokens -= 1
-            self.last = now
-            return 0
-        wait = (1 - self.tokens) / self.rate
-        self.tokens = 0
-        self.last = now
-        time.sleep(wait)
-        return wait
-
-_token_bucket = TokenBucket(20)  # 20 RPM = 3s between calls
 PROMPTS_DIR = BASE_DIR / "prompts"
 
 # Response format capability cache
@@ -568,7 +576,7 @@ def _call_llm(
     user_content: str, 
     logger=None, 
     fallback_model: str = None, 
-    max_retries: int = 3,
+    max_retries: int = 5,
     call_name: str = "llm_call",
     supporting_data_dir: Path = None,
     json_validation_retries: int = 2
@@ -652,7 +660,7 @@ def _call_llm(
                 f"error={str(err)[:500]}"
             )
         return status_code
-
+    
     def _validate_and_parse(content: str, schema: dict) -> dict:
         """Parse and validate content against schema."""
         parsed = _parse_json_from_response(content)
@@ -661,15 +669,7 @@ def _call_llm(
             if not is_valid:
                 raise ValueError(f"JSON validation failed: {'; '.join(errors)}")
         return parsed
-
-    # Rate limit: wait for token bucket
-    wait = _token_bucket.take()
-    if wait > 0:
-        metadata["rate_limit_wait_seconds"] = wait
-        if logger:
-            logger.info(f"[{call_name}] Rate limiting: waiting {wait:.1f}s")
-        time.sleep(wait)
-
+    
     schema = _get_schema_for_call(call_name)
     use_strict_json = schema and _check_response_format_support(model) and _schema_supports_strict_mode(call_name)
     
@@ -697,11 +697,20 @@ def _call_llm(
         # force a JSON object so the model cannot fall back to prose - which is
         # exactly what "LLM returned str, expected JSON object" was.
         request_kwargs["response_format"] = {"type": "json_object"}
-
+    
     primary_error = None
     for attempt in range(max_retries + 1):
         try:
-            response = client.chat.completions.create(**request_kwargs)
+            def make_call():
+                return client.chat.completions.create(**request_kwargs)
+            
+            response = rate_limited_call(
+                bucket_name="stage4_performance_table",
+                call_fn=make_call,
+                max_retries=max_retries - attempt,
+                logger=logger
+            )
+            
             choices = getattr(response, "choices", None)
             if not choices:
                 error_msg = f"No choices returned from LLM (possible rate limit). Response id: {getattr(response, 'id', 'N/A')}"
@@ -748,6 +757,12 @@ def _call_llm(
                 )
             return parsed
             
+        except RateLimitExceeded as rle:
+            # Daily limit exceeded - don't retry
+            if logger:
+                logger.error(f"[{call_name}] Daily rate limit exceeded: {rle}")
+            raise
+        
         except Exception as err1:
             status_code = _log_error(err1, attempt, model, is_fallback=False)
             primary_error = err1
@@ -755,11 +770,9 @@ def _call_llm(
             is_rate_limit = "429" in error_str or "rate limit" in error_str.lower()
             
             if is_rate_limit and attempt < max_retries:
-                wait_time = 2 ** attempt  # 1s, 2s, 4s
+                # rate_limited_call handles 429 retry with backoff
                 if logger:
-                    logger.warning(f"[{call_name}] Rate limit hit (attempt {attempt + 1}/{max_retries + 1}), waiting {wait_time}s: {err1}")
-                print(f"  [LLM] Rate limit hit, waiting {wait_time}s before retry...")
-                time.sleep(wait_time)
+                    logger.warning(f"[{call_name}] Rate limit hit (attempt {attempt + 1}/{max_retries + 1}), will retry")
                 continue
             
             # JSON validation failure - retry with re-ask
@@ -814,7 +827,16 @@ def _call_llm(
                 fallback_request_kwargs["response_format"] = request_kwargs.get("response_format")
             
             try:
-                response = client.chat.completions.create(**fallback_request_kwargs)
+                def make_fallback_call():
+                    return client.chat.completions.create(**fallback_request_kwargs)
+                
+                response = rate_limited_call(
+                    bucket_name="stage4_performance_table",
+                    call_fn=make_fallback_call,
+                    max_retries=max_retries - attempt,
+                    logger=logger
+                )
+                
                 choices = getattr(response, "choices", None)
                 if not choices:
                     error_msg = f"Fallback model also returned no choices. Response id: {getattr(response, 'id', 'N/A')}"
@@ -857,6 +879,11 @@ def _call_llm(
                     )
                 return parsed
                 
+            except RateLimitExceeded as rle:
+                if logger:
+                    logger.error(f"[{call_name}] Fallback model also rate limited: {rle}")
+                raise
+            
             except Exception as err2:
                 _log_error(err2, attempt, fallback_model, is_fallback=True)
                 if "429" in str(err2) or "rate limit" in str(err2).lower():
@@ -1163,7 +1190,7 @@ def _parse_call_name(call_name: str) -> tuple[str, int | None]:
     return extractor, fiscal_year
 
 
-def _make_checkpointed_call(db, run_id: str, logger):
+def _make_checkpointed_call(db, run_id: str, logger, original_call_llm):
     """Return a _call_llm-compatible wrapper backed by SQLite checkpointing.
 
     The wrapper is a drop-in for `_call_llm`: same signature, same return
@@ -1218,7 +1245,7 @@ def _make_checkpointed_call(db, run_id: str, logger):
 
             start = time.time()
             try:
-                result = _call_llm(
+                result = original_call_llm(
                     client, model, prompt_text, user_content, logger,
                     fallback_model, max_retries, call_name,
                     supporting_data_dir, json_validation_retries,
@@ -1242,6 +1269,59 @@ def _make_checkpointed_call(db, run_id: str, logger):
                 raise
 
     return _wrapped
+
+
+# The AR text cache is keyed by ticker and fiscal year, so the same PDF
+# requested under two fiscal years is extracted twice - once for the AR that
+# reports the year and once for the AR that shows it as a comparative.  A
+# 170-page PDF takes a while to extract, and Stage 4 needs several ARs, so the
+# pages are memoised by file path for the lifetime of the process.
+_AR_PAGE_MEMO: dict = {}
+
+
+def _ar_pages(ticker: str, fy: int, ar_file: Path, logger=None):
+    """Cached AR pages, memoised by file path within this process."""
+    try:
+        key = str(Path(ar_file).resolve()).lower()
+    except OSError:
+        key = str(ar_file).lower()
+    if key not in _AR_PAGE_MEMO:
+        _AR_PAGE_MEMO[key] = get_ar_pages(ticker, fy, ar_file, logger)
+    return _AR_PAGE_MEMO[key]
+
+
+def _normalize_eps_units(compiled: dict, logger=None) -> None:
+    """Normalise EPS values that are stated in cents rather than dollars.
+
+    The performance table reports EPS in cents per share.  Some issuers state
+    the figure in cents as a plain number ("5.3"), others as a scaled number
+    ("530"), and the heuristic below tells them apart: if most years exceed
+    100 the values are scaled cents and are divided by 100.
+    """
+    for key in ("eps", "underlying_eps"):
+        values = []
+        for fy, yd in compiled.get("years", {}).items():
+            if yd.get(key) is not None:
+                try:
+                    values.append((fy, float(yd[key])))
+                except (ValueError, TypeError):
+                    pass
+        if not values:
+            continue
+        cents_count = sum(1 for _, v in values if v > 100)
+        if cents_count < len(values) * 0.5:
+            continue
+        if logger:
+            logger.info(f"Normalizing {key} from scaled cents for {len(values)} years")
+        for fy, yd in compiled.get("years", {}).items():
+            if yd.get(key) is None:
+                continue
+            try:
+                value = float(yd[key])
+            except (ValueError, TypeError):
+                continue
+            if value > 100:
+                yd[key] = round(value / 100.0, 2)
 
 
 def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=None) -> bool:
@@ -1273,9 +1353,9 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
     latest_ar_path = ar_files_sorted[0]
     latest_year = int(re.search(r"(\d{4})", latest_ar_path.stem).group(1))
     ticker = workspace_dir.name.split("_")[0]
-    
+
     # Get cached pages for latest AR
-    latest_ar_pages = get_ar_pages(ticker, latest_year, latest_ar_path, logger)
+    latest_ar_pages = _ar_pages(ticker, latest_year, latest_ar_path, logger)
     
     print(f" Latest AR: {latest_ar_path.name} (FY{latest_year})")
     if logger:
@@ -1290,6 +1370,7 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
     # resumable. A run interrupted by a rate limit resumes from the last
     # completed checkpoint instead of redoing work. The wrapper is local to
     # this function, so every call site below picks it up unchanged.
+    _llm_call = _call_llm
     if supporting_data_dir is not None:
         # run_id is deterministic (the workspace name, e.g. "SUN_2026") so a
         # re-run resumes completed checkpoints instead of starting fresh. A
@@ -1302,7 +1383,7 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
             ["prompt_1a", "prompt_1b", "prompt_2", "prompt_3", "prompt_4"],
             years,
         )
-        _call_llm = _make_checkpointed_call(db, run_id, logger)
+        _llm_call = _make_checkpointed_call(db, run_id, logger, _call_llm)
         if logger:
             logger.info(f"Checkpointing enabled: run_id={run_id}")
     else:
@@ -1318,6 +1399,7 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
         "extraction_confidence": None,
         "years": {},
         "ceo_realised_pay": {},
+        "ceo_statutory_pay": {},
         "audit_notes": []
     }
     
@@ -1328,24 +1410,25 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
         logger.stage_start("Stage 4a: Extract 5-Year Table from Latest AR")
     
     t0 = time.time()
-    table_keywords = [
-        "performance summary", "five year financial", "5 year financial", 
-        "financial summary", "key financial data", "financial highlights", 
-        "financial performance", "financial history", "5-year summary",
-        "five year summary", "financial review", "statutory performance"
-    ]
-    rem_keywords = [
-        "remuneration", "statutory performance", "remuneration-performance",
-        "remuneration report", "key management personnel", "executive remuneration",
-        "realised pay", "realized pay", "short-term incentive", "long-term incentive",
-        "STI outcomes", "LTI outcomes", "equity awards"
-    ]
-    table_pages = _select_section_pages(latest_ar_pages, table_keywords, logger=logger, max_pages=20, radius=1)
-    rem_pages = _select_section_pages(latest_ar_pages, rem_keywords, logger=logger, max_pages=30, radius=1)
+    # Use retrieval specs for targeted section extraction
+    ar_budget = int(os.getenv("AR_BUDGET_CHARS", "250000"))
+    financial_result = build_context(latest_ar_pages, STAGE4_FINANCIAL_SPECS, budget_chars=ar_budget, logger=logger)
+    if supporting_data_dir:
+        write_manifest(financial_result, supporting_data_dir, "stage4_financial", ticker, latest_year, logger=logger)
+    if logger:
+        logger.info(f"Financial retrieval: {financial_result.coverage_note()}")
+    
+    # Also get remuneration-specific sections
+    remuneration_result = build_context(latest_ar_pages, STAGE4_REMUNERATION_SPECS, budget_chars=ar_budget, logger=logger)
+    if supporting_data_dir:
+        write_manifest(remuneration_result, supporting_data_dir, "stage4_remuneration", ticker, latest_year, logger=logger)
+    if logger:
+        logger.info(f"Remuneration retrieval: {remuneration_result.coverage_note()}")
+    
     t1 = time.time()
     if logger:
-        logger.info(f"PDF scanning completed in {t1-t0:.1f}s")
-
+        logger.info(f"PDF retrieval completed in {t1-t0:.1f}s")
+    
     prompt_1a = _load_prompt("5yr_perf_hist_1a.txt")
     prompt_1b = _load_prompt("5yr_perf_hist_1b.txt")
     
@@ -1355,24 +1438,25 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
         logger.info(f"Prompt 1b size: {len(prompt_1b)} chars")
 
     result_1a = None
-    if table_pages:
+    # Use combined financial text for prompt 1a
+    combined_1a_slice = financial_result.text
+    if combined_1a_slice:
         if logger:
-            logger.info(f"Found 5-year table on pages: {table_pages}")
+            logger.info(f"Found 5-year table slice: {len(combined_1a_slice)} chars")
         t_slice = time.time()
-        table_slice = _slice_cached_text(latest_ar_pages, table_pages)
         t_slice_end = time.time()
         if logger:
-            logger.info(f"PDF slicing: {t_slice_end - t_slice:.1f}s, slice size: {len(table_slice)} chars")
+            logger.info(f"Slice prep: {t_slice_end - t_slice:.1f}s, slice size: {len(combined_1a_slice)} chars")
         user_content_1a = (
             f"COMPANY: {workspace_dir.name.split('_')[0]}\n"
             f"CURRENT_FY: {latest_year}\n\n"
-            f"LATEST_AR_5YR_SLICE:\n{table_slice}"
+            f"LATEST_AR_5YR_SLICE:\n{combined_1a_slice}"
         )
         if logger:
             logger.info(f"User content 1a size: {len(user_content_1a)} chars")
         try:
             t_llm = time.time()
-            result_1a = _call_llm(
+            result_1a = _llm_call(
                 client, PERFORMANCE_MODEL, prompt_1a, user_content_1a, logger, 
                 PERFORMANCE_FALLBACK_MODEL, call_name="prompt_1a", supporting_data_dir=supporting_data_dir
             )
@@ -1380,7 +1464,6 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
             if logger:
                 logger.info(f"LLM call 1a took {t_llm_end - t_llm:.1f}s")
             if supporting_data_dir:
-                # Raw response is saved in metadata by _call_llm
                 pass
             if result_1a.get("table_found"):
                 compiled["table_found"] = True
@@ -1388,8 +1471,28 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
                 for fy, data in result_1a.get("years", {}).items():
                     normalized_fy = _normalize_year_key(fy)
                     compiled["years"][normalized_fy] = data
+                # The five-year summary normally reports dividends PAID during
+                # the year, which is what a total shareholder return includes.
+                # Keep that row: it is overwritten further down by the
+                # dividends DECLARED for the FY, and both are needed.
+                for fy, data in compiled["years"].items():
+                    if not isinstance(data, dict):
+                        continue
+                    if data.get("dividend_paid") is None and data.get("dividend") is not None:
+                        data["dividend_paid"] = data["dividend"]
+                        data["dividend_paid_source_page"] = data.get("dividend_source_page")
+                        data["dividend_paid_note"] = (
+                            "Five-year summary dividend row, taken as dividends paid "
+                            "during the year (the summary footnote says so where the "
+                            "issuer distinguishes paid from declared)."
+                        )
                 if logger:
                     logger.info(f"Prompt 1a: table found, {len(result_1a.get('years', {}))} years extracted")
+                # Derive latest financial year from the actual 5-year summary data,
+                # not from the AR filename (AMP_YYYY_AR.pdf covers FY(YYYY-1)).
+                if compiled["years"]:
+                    latest_year = max(int(y) for y in compiled["years"].keys())
+                    compiled["current_fy"] = str(latest_year)
             else:
                 if logger:
                     logger.warning("Prompt 1a: 5-year table not found in latest AR")
@@ -1413,23 +1516,23 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
         logger.stage_start("Stage 4b: Cross-Check Share Prices (Remuneration Table)")
     
     result_1b = None
-    if result_1a and result_1a.get("table_found") and rem_pages:
+    # Use combined remuneration text for prompt 1b
+    combined_1b_slice = remuneration_result.text
+    if result_1a and result_1a.get("table_found") and combined_1b_slice:
         if logger:
-            logger.info(f"Found remuneration-performance pages: {rem_pages}")
-        rem_slice = _slice_cached_text(latest_ar_pages, rem_pages)
+            logger.info(f"Found remuneration-performance slice: {len(combined_1b_slice)} chars")
         user_content_1b = (
             f"COMPANY: {workspace_dir.name.split('_')[0]}\n"
             f"CURRENT_FY: {latest_year}\n\n"
-            f"LATEST_AR_REM_PERFORMANCE_SLICE:\n{rem_slice}\n\n"
+            f"LATEST_AR_REM_PERFORMANCE_SLICE:\n{combined_1b_slice}\n\n"
             f"PROMPT_1A_OUTPUT:\n{json.dumps(result_1a, indent=2)}"
         )
         try:
-            result_1b = _call_llm(
+            result_1b = _llm_call(
                 client, PERFORMANCE_MODEL, prompt_1b, user_content_1b, logger, 
                 PERFORMANCE_FALLBACK_MODEL, call_name="prompt_1b", supporting_data_dir=supporting_data_dir
             )
             if supporting_data_dir:
-                # Raw response is saved in metadata by _call_llm
                 pass
             
             if result_1b.get("overrides"):
@@ -1465,7 +1568,13 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
             missing_years.append(yr)
         elif compiled["years"][yr_str]:
             year_data = compiled["years"][yr_str]
-            missing_metrics = [m for m in ["npat", "underlying_npat", "share_price", "dividend", "simple_tsr", "eps", "revenue", "net_assets", "roe", "roce"] if year_data.get(m) is None]
+            missing_metrics = [m for m in ["npat", "underlying_npat", "share_price", "simple_tsr", "revenue", "net_assets", "roe", "roce"] if year_data.get(m) is None]
+            # Dividend and EPS are always re-extracted from individual ARs because
+            # the 5-year summary shows "dividends paid during the year" not
+            # "dividends declared for the FY", and EPS may be misattributed across
+            # year columns. Individual ARs disclose the correct per-FY values.
+            missing_metrics.append("dividend")
+            missing_metrics.append("eps")
             if missing_metrics:
                 compiled["years"][yr_str]["missing_metrics"] = missing_metrics
     
@@ -1485,12 +1594,21 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
             yr_str = str(yr)
             if logger:
                 logger.info(f"Prompt 2: Starting gap-fill for FY{yr}")
+            # ASX annual reports are typically published in the year AFTER the
+            # financial year ends. AMP_YYYY_AR.pdf covers FY(YYYY-1). So for FY Y,
+            # try AMP_{Y+1}_AR.pdf first, then fall back to AMP_Y_AR.pdf.
             ar_file = None
             for f in ar_files_sorted:
                 file_year_match = re.search(r"(\d{4})", f.stem)
-                if file_year_match and int(file_year_match.group(1)) == yr:
+                if file_year_match and int(file_year_match.group(1)) == yr + 1:
                     ar_file = f
                     break
+            if not ar_file:
+                for f in ar_files_sorted:
+                    file_year_match = re.search(r"(\d{4})", f.stem)
+                    if file_year_match and int(file_year_match.group(1)) == yr:
+                        ar_file = f
+                        break
             
             if not ar_file:
                 if logger:
@@ -1498,12 +1616,12 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
                 continue
             
             # Get cached pages for this AR
-            ar_pages = get_ar_pages(ticker, yr, ar_file, logger)
+            ar_pages = _ar_pages(ticker, yr, ar_file, logger)
             
             if yr_str in compiled["years"] and compiled["years"][yr_str]:
                 missing_metrics = compiled["years"][yr_str].get("missing_metrics", [])
             else:
-                missing_metrics = ["npat", "underlying_npat", "share_price", "dividend", "simple_tsr", "eps", "revenue", "net_assets", "roe", "roce"]
+                missing_metrics = ["npat", "underlying_npat", "share_price", "simple_tsr", "revenue", "net_assets", "roe", "roce", "dividend", "eps"]
             
             if not missing_metrics:
                 if logger:
@@ -1511,23 +1629,18 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
                 continue
             
             t0 = time.time()
-            gap_keywords = [
-                "financial review", "notes to the accounts", "statutory performance", 
-                "key financial data", "five year", "5 year", "financial statements",
-                "income statement", "statement of financial performance", 
-                "performance summary", "earnings per share", "total shareholder return",
-                "NPAT", "revenue", "return on equity", "ROCE", "share price", "dividend"
-            ]
-            relevant_pages = _select_section_pages(ar_pages, gap_keywords, logger=logger, max_pages=50, radius=1)
-            if not relevant_pages:
-                if logger:
-                    logger.warning(f"Prompt 2: FY{yr} - no keyword matches found in annual report")
-                continue
+            # Use retrieval specs for targeted section extraction
+            financial_result = build_context(ar_pages, STAGE4_FINANCIAL_SPECS, budget_chars=ar_budget, logger=logger)
+            if supporting_data_dir:
+                write_manifest(financial_result, supporting_data_dir, "stage4_financial", ticker, yr, logger=logger)
+            if logger:
+                logger.info(f"Financial retrieval FY{yr}: {financial_result.coverage_note()}")
             
-            ar_slice = _slice_cached_text(ar_pages, relevant_pages, logger=logger)
+            # Use combined financial text
+            ar_slice = financial_result.text
             t1 = time.time()
             if logger:
-                logger.info(f"Prompt 2: FY{yr} PDF slice extracted in {t1-t0:.1f}s ({len(ar_slice)} chars)")
+                logger.info(f"Prompt 2: FY{yr} retrieval slice extracted in {t1-t0:.1f}s ({len(ar_slice)} chars)")
             
             user_content_2 = (
                 f"COMPANY: {workspace_dir.name.split('_')[0]}\n"
@@ -1537,7 +1650,7 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
             )
             
             try:
-                result_2 = _call_llm(
+                result_2 = _llm_call(
                     client, PERFORMANCE_MODEL, prompt_2, user_content_2, logger, 
                     PERFORMANCE_FALLBACK_MODEL, call_name=f"prompt_2_fy{yr}", supporting_data_dir=supporting_data_dir
                 )
@@ -1579,29 +1692,28 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
         file_year_match = re.search(r"(\d{4})", ar_file.stem)
         if not file_year_match:
             continue
-        yr = int(file_year_match.group(1))
+        # ASX annual reports are typically published the year after the
+        # financial year ends. AMP_YYYY_AR.pdf covers FY(YYYY-1).
+        yr = int(file_year_match.group(1)) - 1
         yr_str = str(yr)
         
         if logger:
             logger.info(f"Prompt 3: Starting CEO pay extraction for FY{yr}")
         
         # Get cached pages for this AR
-        ar_pages = get_ar_pages(ticker, yr, ar_file, logger)
-        
-        ceo_keywords = [
-            "remuneration report", "remuneration", "key management personnel", 
-            "KMP", "executive remuneration", "STI outcomes", "LTI outcomes", 
-            "equity awards", "realised pay", "realized pay", "short-term incentive",
-            "long-term incentive", "realised remuneration", "realized remuneration"
-        ]
-        rem_pages = _select_section_pages(ar_pages, ceo_keywords, logger=logger, max_pages=40, radius=1)
-        if not rem_pages:
-            if logger:
-                logger.warning(f"No remuneration pages found in {ar_file.name}")
-            continue
+            ar_pages = _ar_pages(ticker, yr, ar_file, logger)
+
         
         t0 = time.time()
-        rem_slice = _slice_cached_text(ar_pages, rem_pages, logger=logger)
+        # Use retrieval specs for targeted section extraction
+        remuneration_result = build_context(ar_pages, STAGE4_REMUNERATION_SPECS, budget_chars=ar_budget, logger=logger)
+        if supporting_data_dir:
+            write_manifest(remuneration_result, supporting_data_dir, "stage4_remuneration", ticker, yr, logger=logger)
+        if logger:
+            logger.info(f"Remuneration retrieval FY{yr}: {remuneration_result.coverage_note()}")
+        
+        # Use combined remuneration text
+        rem_slice = remuneration_result.text
         t1 = time.time()
         if logger:
             logger.info(f"Prompt 3: FY{yr} remuneration slice extracted in {t1-t0:.1f}s ({len(rem_slice)} chars)")
@@ -1613,7 +1725,7 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
         )
         
         try:
-            result_3 = _call_llm(
+            result_3 = _llm_call(
                 client, PERFORMANCE_MODEL, prompt_3, user_content_3, logger, 
                 PERFORMANCE_FALLBACK_MODEL, call_name=f"prompt_3_fy{yr}", supporting_data_dir=supporting_data_dir
             )
@@ -1677,11 +1789,106 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
                 prompt_3_success = True
                 if logger:
                     logger.info(f"Prompt 3: FY{yr} CEO realised pay = ${ceo_rem:.2f}m")
+            
+            # Also extract and store statutory pay if present
+            if claim.get("ceo_statutory_rem") is not None:
+                statutory_rem = claim["ceo_statutory_rem"]
+                if isinstance(statutory_rem, (int, float)):
+                    if statutory_rem > 1000000:
+                        if logger:
+                            logger.warning(f"CEO statutory pay value {statutory_rem} appears to be in raw dollars, converting to $millions")
+                        statutory_rem = statutory_rem / 1000000.0
+                    elif statutory_rem > 1000:
+                        if logger:
+                            logger.warning(f"CEO statutory pay value {statutory_rem} appears to be in thousands, converting to $millions")
+                        statutory_rem = statutory_rem / 1000.0
+                
+                compiled.setdefault("ceo_statutory_pay", {})[yr_str] = {
+                    "value_m": statutory_rem,
+                    "source_method": claim.get("statutory_basis", "disclosed_statutory"),
+                    "source_page": claim.get("disclosed_statutory_source_page", ""),
+                    "notes": f"CEO: {claim.get('ceo_name', 'Unknown')}"
+                }
+                if logger:
+                    logger.info(f"Prompt 3: FY{yr} CEO statutory pay = ${statutory_rem:.2f}m")
         except Exception as e:
             print(f" Error in Prompt 3 for FY{yr}: {e}")
             if logger:
                 logger.error(f"Prompt 3 failed for FY{yr}: {e}")
-    
+
+    # ============================================================
+    # Fallback: CEO realised pay from the Annual Report itself.
+    #
+    # Prompt 3 is a model call per year and the free-tier models drop some of
+    # them; it also answers "not disclosed" when the realised-pay table is in
+    # the AR but outside the retrieved slice.  The issuer's voluntary
+    # "actual remuneration received" table is read directly as a backstop.
+    # ============================================================
+    try:
+        from remuneration_framework import (detect_ceo_name, extract_ceo_realised_pay,
+                                            extract_ceo_statutory_pay)
+    except Exception:
+        detect_ceo_name = None
+        extract_ceo_realised_pay = None
+        extract_ceo_statutory_pay = None
+
+    if extract_ceo_realised_pay:
+        ceo_names = []
+        for row in compiled.get("ceo_realised_pay", {}).values():
+            notes = (row or {}).get("notes") or ""
+            match = re.search(r"CEO:\s*(.+)$", notes)
+            if match:
+                ceo_names.append(match.group(1).strip())
+        ceo_name = ceo_names[0] if ceo_names else ""
+        if not ceo_name:
+            for row in compiled.get("ceo_statutory_pay", {}).values():
+                notes = (row or {}).get("notes") or ""
+                match = re.search(r"CEO:\s*(.+)$", notes)
+                if match:
+                    ceo_name = match.group(1).strip()
+                    break
+        if not ceo_name and detect_ceo_name:
+            for ar_file in ar_files_sorted:
+                ar_pages = _ar_pages(ticker, int(re.search(r"(\d{4})", ar_file.stem).group(1)) - 1,
+                                      ar_file, logger)
+                ceo_name = detect_ceo_name(ar_pages, ticker)
+                if ceo_name:
+                    if logger:
+                        logger.info(f"CEO name detected from the AR: {ceo_name}")
+                    break
+
+        if ceo_name:
+            for ar_file in ar_files_sorted:
+                file_year_match = re.search(r"(\d{4})", ar_file.stem)
+                if not file_year_match:
+                    continue
+                yr = int(file_year_match.group(1)) - 1
+                yr_str = str(yr)
+                ar_pages = _ar_pages(ticker, yr, ar_file, logger)
+                found = extract_ceo_realised_pay(ar_pages, ceo_name, target_fy=yr, logger=logger)
+                if found:
+                    existing = compiled.get("ceo_realised_pay", {}).get(yr_str)
+                    if existing:
+                        previous = existing.get("value_m")
+                        if previous is not None and abs(previous - found["value_m"]) > 0.005:
+                            compiled.setdefault("audit_notes", []).append(
+                                f"FY{yr} CEO realised pay: the Annual Report's own table "
+                                f"gives ${found['value_m']:.3f}m (p.{found['source_page']}); the "
+                                f"model reported ${previous:.3f}m. The AR figure is used."
+                            )
+                    compiled.setdefault("ceo_realised_pay", {})[yr_str] = found
+                    if logger:
+                        logger.info(
+                            f"CEO realised pay from AR: FY{yr} = ${found['value_m']:.3f}m "
+                            f"(page {found['source_page']})"
+                        )
+
+                if extract_ceo_statutory_pay:
+                    statutory = extract_ceo_statutory_pay(ar_pages, ceo_name, target_fy=yr,
+                                                         logger=logger)
+                    if statutory:
+                        compiled.setdefault("ceo_statutory_pay", {})[yr_str] = statutory
+
     if logger:
         logger.stage_end("Stage 4d: Extract CEO Realised Pay", prompt_3_success)
     
@@ -1700,7 +1907,7 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
     )
     
     try:
-        result_4 = _call_llm(
+        result_4 = _llm_call(
             client, PERFORMANCE_MODEL, prompt_4, user_content_4, logger, 
             PERFORMANCE_FALLBACK_MODEL, call_name="prompt_4", supporting_data_dir=supporting_data_dir
         )
@@ -1716,6 +1923,10 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
     # Many ARs (Macquarie is the clear case) publish no multi-year share-price
     # history, so these two metrics are genuinely not extractable from the AR.
     # Historical FY-end closes are deterministic market facts, cached per ticker.
+    # The closes are kept so the TSR recomputation below can use them for any
+    # year whose price came from the backfill rather than from the AR.
+    market_closes: dict = {}
+    backfilled_years: set = set()
     try:
         from share_prices import (compute_simple_tsr, detect_fy_end_month_day,
                                   get_fy_closes, yahoo_symbol)
@@ -1728,6 +1939,7 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
             month, day = fy_end
             years_desc = sorted(int(y) for y in compiled.get("years", {}).keys())
             closes = get_fy_closes(ticker, month, day, years_desc)
+            market_closes = dict(closes)
             tsr_by_year = compute_simple_tsr(closes)
             for y in years_desc:
                 y_str = str(y)
@@ -1737,6 +1949,7 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
                 yd.setdefault("missing_metrics", [])
                 if yd.get("share_price") in (None, "") and closes.get(y) is not None:
                     yd["share_price"] = round(closes[y], 2)
+                    backfilled_years.add(y)
                     if "share_price" in yd["missing_metrics"]:
                         yd["missing_metrics"].remove("share_price")
                 if yd.get("simple_tsr") in (None, "") and tsr_by_year.get(y) is not None:
@@ -1745,12 +1958,244 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
                         yd["missing_metrics"].remove("simple_tsr")
             if logger:
                 logger.info(
-                    "Share-price backfill: %d years from %s (FY-end %02d/%02d)",
-                    len(years_desc), yahoo_symbol(ticker), month, day,
+                    f"Share-price backfill: {len(years_desc)} years from "
+                    f"{yahoo_symbol(ticker)} (FY-end {month:02d}/{day:02d})"
                 )
     except Exception as e:
         if logger:
             logger.warning(f"Share-price backfill could not run: {e}")
+
+    # Normalize EPS units once every EPS source has been consulted - see
+    # _normalize_eps_units below, called after the EPS post-processing.
+
+    # ============================================================
+    # Post-process: extract dividends declared per FY from individual ARs
+    # The 5-year summary table shows "dividends PAID during the year" which is
+    # a different metric from "dividends DECLARED for the FY". Individual ARs'
+    # Appendix 4E (typically page 2) discloses interim + final dividends
+    # declared for each FY. Override any 5-year summary dividend values with
+    # the correct per-FY declared totals.
+    # ============================================================
+    import re as _re
+
+    def _parse_dividend_amount(after_dividend: str):
+        """Extract the first dividend amount (cents) from text after 'dividend'.
+        Skips percentages, footnote references, times, dates, and non-dividend numbers."""
+        tokens = after_dividend.split()
+        for token in tokens:
+            # Skip percentages
+            if '%' in token:
+                continue
+            clean = token.strip('.,;:()')
+            # Skip footnote references (contain commas)
+            if ',' in clean:
+                continue
+            # Skip time expressions (contain colon)
+            if ':' in clean:
+                continue
+            try:
+                val = float(clean)
+                # Dividend amounts are typically 0-100 cents; skip dates/years
+                if val > 0 and val <= 100:
+                    return val
+            except ValueError:
+                continue
+        return None
+
+    for fy_str, fy_data in compiled["years"].items():
+        fy = int(fy_str)
+        for ar_file in ar_files_sorted:
+            file_year_match = _re.search(r"(\d{4})", ar_file.stem)
+            if not file_year_match:
+                continue
+            pub_year = int(file_year_match.group(1))
+            if pub_year - 1 != fy:
+                continue
+            ar_pages = _ar_pages(ticker, fy, ar_file, logger)
+            total_dividend = 0.0
+            dividend_found = False
+            dividend_source_page = None
+            for p in ar_pages:
+                text = p.get("text") or ""
+                page_num = p.get("page_number", 0)
+                page_total = 0.0
+                page_found = False
+                for line in text.split('\n'):
+                    line_lower = line.lower()
+                    if 'dividend' not in line_lower:
+                        continue
+                    # Skip non-dividend-amount lines (record dates, DRP, etc.)
+                    if any(kw in line_lower for kw in [
+                        'record date', 'payable date', 'drp', 'dividend reinvestment',
+                        'participation', 'entitlement', 'conduit foreign',
+                        'franking rate', 'dividend franking',
+                    ]):
+                        continue
+                    # Check for "final dividend" or "interim dividend" on this line
+                    is_final = 'final' in line_lower and 'dividend' in line_lower
+                    is_interim = 'interim' in line_lower and 'dividend' in line_lower
+                    if not (is_final or is_interim):
+                        continue
+                    idx = line_lower.find('dividend')
+                    amount = _parse_dividend_amount(line[idx + len('dividend'):])
+                    if amount is not None:
+                        page_total += amount
+                        page_found = True
+                if page_found:
+                    total_dividend = round(page_total, 1)
+                    dividend_found = True
+                    dividend_source_page = page_num
+                    break
+            if not dividend_found:
+                for p in ar_pages:
+                    text = (p.get("text") or "").lower()
+                    if ("no dividend" in text or "not to pay a dividend" in text
+                            or ("not declare" in text and "dividend" in text)):
+                        total_dividend = 0.0
+                        dividend_found = True
+                        dividend_source_page = p.get("page_number", 0)
+                        break
+            if dividend_found:
+                fy_data["dividend"] = total_dividend
+                fy_data["dividend_source_page"] = dividend_source_page
+                if "dividend" in fy_data.get("missing_metrics", []):
+                    fy_data["missing_metrics"].remove("dividend")
+                if logger:
+                    logger.info(
+                        f"Dividend post-process: FY{fy} = {total_dividend}c "
+                        f"(page {dividend_source_page})"
+                    )
+            break
+
+    # ============================================================
+    # Post-process: EPS from the individual ARs.
+    #
+    # A model's EPS can be attributed to the wrong year: an AR prints the
+    # current year and the comparative side by side, and reading the columns
+    # loosely reports the comparative under the current year.  AMP FY2024 was
+    # reported as 9.3c, which is FY2023's number - FY2024's reported EPS is
+    # 5.7c and its underlying EPS is 9.0c.  The deterministic extractor keys
+    # off the column header, so it wins where it finds a figure; the AR that
+    # reports the year is preferred over the next AR, which shows it only as
+    # a comparative.
+    # ============================================================
+    try:
+        from eps_extraction import extract_eps
+    except Exception:
+        extract_eps = None
+
+    if extract_eps is not None:
+        for fy_str, fy_data in compiled["years"].items():
+            fy = int(fy_str)
+            candidates = []
+            for ar_file in ar_files_sorted:
+                file_year_match = _re.search(r"(\d{4})", ar_file.stem)
+                if not file_year_match:
+                    continue
+                pub_year = int(file_year_match.group(1))
+                if pub_year - 1 == fy:
+                    candidates.append((0, ar_file))
+                elif pub_year - 2 == fy:
+                    candidates.append((1, ar_file))
+            candidates.sort(key=lambda item: item[0])
+
+            best = {}
+            for _, ar_file in candidates:
+                ar_pages = _ar_pages(ticker, fy, ar_file, logger)
+                found = extract_eps(ar_pages, fy)
+                if not found:
+                    continue
+                for key in ("eps", "underlying_eps"):
+                    if found.get(key) is None:
+                        continue
+                    if key not in best:
+                        best[key] = found
+                if "eps" in best and "underlying_eps" in best:
+                    break
+
+            for key in ("eps", "underlying_eps"):
+                found = best.get(key)
+                if not found or found.get(key) is None:
+                    continue
+                previous = fy_data.get(key)
+                fy_data[key] = found[key]
+                fy_data[f"{key}_source_page"] = found.get(f"{key}_source_page")
+                if key in fy_data.get("missing_metrics", []):
+                    fy_data["missing_metrics"].remove(key)
+                if logger:
+                    note = ""
+                    if previous is not None and previous != found[key]:
+                        note = f" (replaced model's {previous})"
+                    logger.info(
+                        f"EPS post-process: FY{fy} {key} = {found[key]}c "
+                        f"(page {found.get(f'{key}_source_page')}){note}"
+                    )
+
+    _normalize_eps_units(compiled, logger)
+
+    # ============================================================
+    # Recompute simple TSR as a total shareholder return.
+    #
+    # A TSR includes the dividends received over the year, not just the
+    # share price move.  Issuers define it that way themselves - AMP's 2025
+    # annual report (p.173) defines TSR as "the changes in market value of
+    # AMP shares, plus the value of any dividends paid and capital returns".
+    # The share prices used are the ones shown in the table, so the figure is
+    # reproducible from the report itself.
+    # ============================================================
+    try:
+        tsr_years = sorted(int(y) for y in compiled.get("years", {}).keys())
+        prices = {}
+        for fy in tsr_years:
+            raw = compiled["years"][str(fy)].get("share_price")
+            try:
+                prices[fy] = float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                prices[fy] = None
+
+        dividends_paid = {}
+        for fy in tsr_years:
+            # Only the dividends PAID during the year belong in a total
+            # shareholder return.  The declared dividend is a different figure
+            # and must not be substituted for it: the declared dividend for
+            # FY Y is mostly paid in FY Y+1.
+            raw = compiled["years"][str(fy)].get("dividend_paid")
+            try:
+                dividends_paid[fy] = float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                dividends_paid[fy] = None
+
+        for idx in range(1, len(tsr_years)):
+            fy = tsr_years[idx]
+            prev_fy = tsr_years[idx - 1]
+            # Use the prices shown in the table so the TSR is reproducible
+            # from the report.  If either endpoint's price came from the
+            # market-data backfill, use the market closes for both ends so a
+            # single year's return is not computed from mixed sources.
+            if fy in backfilled_years or prev_fy in backfilled_years:
+                start = market_closes.get(prev_fy)
+                end = market_closes.get(fy)
+            else:
+                start = prices.get(prev_fy)
+                end = prices.get(fy)
+            if not start or not end:
+                continue
+            div_cps = dividends_paid.get(fy) or 0.0
+            div = div_cps / 100.0  # cents per share -> dollars per share
+            tsr = round(((end - start + div) / start) * 100.0, 2)
+            yd = compiled["years"][str(fy)]
+            yd["simple_tsr"] = tsr
+            yd["simple_tsr_source_page"] = yd.get("share_price_source_page")
+            yd["simple_tsr_basis_note"] = (
+                f"({end:g} - {start:g} + {div_cps:g}c dividends paid) / {start:g}"
+            )
+            if "simple_tsr" in yd.get("missing_metrics", []):
+                yd["missing_metrics"].remove("simple_tsr")
+            if logger:
+                logger.info(f"Simple TSR: FY{fy} = {tsr}% (incl. {div_cps}c dividends paid)")
+    except Exception as e:
+        if logger:
+            logger.warning(f"Simple TSR recomputation failed: {e}")
 
     # Save compiled JSON
     compiled_path = workspace_dir / "extracted_json" / "performance_history_5yr.json"
@@ -1773,7 +2218,8 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
         f"|--------|{'|'.join(['------'] * len(compiled['years']))}|"
     ]
     
-    metrics = ["npat", "underlying_npat", "share_price", "dividend", "simple_tsr", "eps", "revenue", "net_assets", "roe", "roce"]
+    metrics = ["npat", "underlying_npat", "share_price", "dividend", "dividend_paid",
+               "simple_tsr", "eps", "underlying_eps", "revenue", "net_assets", "roe", "roce"]
     for metric in metrics:
         row = [metric.replace("_", " ").title()]
         for fy in compiled["years"]:
@@ -1785,13 +2231,13 @@ def run_pipeline(workspace_dir: Path, supporting_data_dir: Path = None, logger=N
                     num_val = float(val)
                 except (ValueError, TypeError):
                     num_val = None
-                
+
                 if num_val is not None:
                     if metric in ["npat", "underlying_npat", "revenue", "net_assets"]:
                         row.append(f"${num_val:,.0f}m")
                     elif metric in ["share_price"]:
                         row.append(f"${num_val:.2f}")
-                    elif metric in ["dividend", "eps"]:
+                    elif metric in ["dividend", "dividend_paid", "eps", "underlying_eps"]:
                         row.append(f"{num_val:.1f}c")
                     elif metric in ["simple_tsr", "roe", "roce"]:
                         row.append(f"{num_val:.1f}%")

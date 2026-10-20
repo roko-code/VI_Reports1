@@ -345,6 +345,66 @@ A wrong expected value does not produce an error. It produces a confident,
 wrong score column. Check the expected values against the page the same way you
 check the actual values.
 
+## 11. Four checks that reported defects that were not there
+
+Found on AMP FY2026 while closing out the performance table. Each of the four
+produced a warning that the pipeline could not act on, and three of them would
+have kept the audit below its pass threshold forever.
+
+### 11a. A loss year replaced the minimum, so the ratio meant nothing
+
+The unit-consistency check wanted to catch one year reported in thousands and
+another in millions. It computed `min_val = min(vals_only) if min(vals_only) > 0
+else 1`, so AMP's FY2021 statutory loss of `-252` was replaced by `1` and the
+check compared `387 / 1` - a 387x "mismatch" between two figures that were
+both in $m, and a range it printed as "1.0 to 387.0" when the actual range was
+-252 to 387.
+
+A figure's scale is its magnitude, so the comparison is now over absolute
+values. A genuine unit mismatch still trips it: 133 against 133000 is 1000x.
+
+### 11b. Counting the word "unc" anywhere is not counting Uncertain results
+
+The check was `raw_content.lower().count("unc") > 5`. That counts the word
+inside "Uncertain" in the completeness checklist ("marked Uncertain with a
+stated reason"), inside prose explaining the one Uncertain row, and inside any
+word beginning "unc". AMP's assessment had exactly one Uncertain row and was
+reported as having many.
+
+The count is now over assessment rows whose *result cell* is Uncertain.
+
+### 11c. An archive copy is not duplicate processing
+
+"NoM JSON exists in both locations - possible duplicate processing" fired
+because the workspace keeps the active extraction in `extracted_json/notices/`
+and a copy in `notices_archived/`. The two files were byte-identical, which is
+the intended state.
+
+The check now compares the files. Identical is information; *divergent* is the
+defect, and that is what the warning is reserved for.
+
+### 11d. A year the publisher never issued is not a missing download
+
+"Only 4/5 VI reports present" fired for AMP. The ASA publishes no Voting
+Intentions report for AMP FY2021 - the year is simply not in the ASA's list,
+and Stage 3 had already recorded it as missing. The check now reads Stage 3's
+`vi_reports_summary.json` and reports such years as information, and the audit
+prompt tells the model not to raise `[INFO]` items.
+
+### 11e. The same class of defect, in the report renderer
+
+The "CEO Remuneration Framework" table rendered `0.00` in every cell for AMP.
+The renderer parsed the model's Section 4 prose, which states amounts in
+thousands (`$1,715 k`), and divided them by a million; and its AR-based path
+looked for an "Awarded Remuneration" heading that only some issuers publish, so
+it found nothing and left the table empty.
+
+A number with a unit marker has to be read with that unit, and a fallback
+restricted to one issuer's heading is not a fallback at all. The framework is
+now derived from the AR - the realised-pay table, the STI outcomes table, the
+percentage-of-fixed-remuneration rules and the disclosed remuneration mix -
+and is rejected unless it reconciles with the mix the issuer publishes.
+
 ## When adding a new validator
 
 1. Build a fixture from a real gnarly case, not a synthetic tidy one. Commit it.

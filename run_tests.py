@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\jurok\VI_Reports1")
+ROOT = Path(__file__).resolve().parent
 TESTS = sorted((ROOT / "tests").glob("test_*.py"))
 
 overall_fail = 0

@@ -328,7 +328,8 @@ class CompanyPipeline:
                 status = perf_data.get("extraction_status", "unknown")
                 years = perf_data.get("years", {})
                 ceo_pay = perf_data.get("ceo_realised_pay", {})
-                performance_valid = status != "failed" and (bool(years) or bool(ceo_pay))
+                ceo_statutory_pay = perf_data.get("ceo_statutory_pay", {})
+                performance_valid = status != "failed" and (bool(years) or bool(ceo_pay) or bool(ceo_statutory_pay))
             except (json.JSONDecodeError, OSError):
                 performance_valid = False
         

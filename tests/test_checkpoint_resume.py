@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\jurok\VI_Reports1")
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import performance_table as pt  # noqa: E402
@@ -40,9 +40,10 @@ def fake_call_llm(client, model, prompt_text, user_content, logger=None,
     return {"echo": call_name, "model": model}
 
 
-# Bind the wrapper to the fake so no network is touched.
-pt._call_llm = fake_call_llm
-wrapped = pt._make_checkpointed_call(db, run_id, None)
+# Bind the wrapper to the fake so no network is touched.  The wrapper calls
+# the _call_llm it is given, so the fake is passed in rather than patched
+# onto the module afterwards.
+wrapped = pt._make_checkpointed_call(db, run_id, None, fake_call_llm)
 
 print("A. First call invokes the LLM and checkpoints")
 r = wrapped(None, "m", "p", "u", call_name="prompt_3_fy2026")
@@ -76,8 +77,9 @@ def failing(client, model, prompt_text, user_content, logger=None,
     raise RuntimeError("boom 429 rate limit")
 
 pt._call_llm = failing
+failing_wrapper = pt._make_checkpointed_call(db, run_id, None, failing)
 try:
-    wrapped(None, "m", "p", "u", call_name="prompt_3_fy2024")
+    failing_wrapper(None, "m", "p", "u", call_name="prompt_3_fy2024")
     check("failed call raises", False, "no exception raised")
 except RuntimeError as e:
     check("failed call raises", "boom" in str(e))

@@ -26,6 +26,7 @@ from ar_file_lookup import find_ar_file as _find_ar_file_lookup
 from llm_json import parse_llm_json
 from news_search_results import load_news_block
 from llm_config import other_resolutions_models
+from rate_limiter import get_bucket, rate_limited_call, RateLimitExceeded
 
 load_dotenv(find_dotenv())
 
@@ -42,29 +43,8 @@ PROMPTS_DIR = BASE_DIR / "prompts"
 # src/retrieval_selftest.py against all 14 cached reports.
 AR_BUDGET_CHARS = int(os.getenv("AR_BUDGET_CHARS", "250000"))
 
-# Token bucket rate limiter: 20 RPM = 3s between calls
-class TokenBucket:
-    def __init__(self, rate_per_minute: int = 18):
-        self.rate = rate_per_minute / 60.0
-        self.tokens = rate_per_minute
-        self.last = time.time()
-
-    def take(self):
-        now = time.time()
-        elapsed = now - self.last
-        if elapsed > 0:
-            self.tokens = min(self.rate * elapsed + self.tokens, self.rate * 60)
-        if self.tokens >= 1:
-            self.tokens -= 1
-            self.last = now
-            return 0
-        wait = (1 - self.tokens) / self.rate
-        self.tokens = 0
-        self.last = now
-        time.sleep(wait)
-        return wait
-
-_token_bucket = TokenBucket(20)
+# Shared rate limiter bucket for Stage 7
+_rate_bucket = get_bucket("stage7_other_resolutions")
 
 # Response format capability cache
 _RESPONSE_FORMAT_SUPPORT = {}
@@ -253,7 +233,7 @@ def _call_llm(
     user_content: str,
     logger=None,
     fallback_model: str = None,
-    max_retries: int = 3,
+    max_retries: int = 5,
     call_name: str = "llm_call",
     supporting_data_dir: Path = None,
     json_validation_retries: int = 2,
@@ -277,13 +257,6 @@ def _call_llm(
     def _write_metadata():
         metadata["elapsed_seconds"] = round(time.time() - call_start, 2)
         _write_llm_call_metadata(supporting_data_dir, call_name, metadata)
-
-    wait = _token_bucket.take()
-    if wait > 0:
-        metadata["rate_limit_wait_seconds"] = wait
-        if logger:
-            logger.info(f"[{call_name}] Rate limiting: waiting {wait:.1f}s")
-        time.sleep(wait)
 
     use_strict_json = schema and _check_response_format_support(model)
 
@@ -313,7 +286,16 @@ def _call_llm(
     primary_error = None
     for attempt in range(max_retries + 1):
         try:
-            response = client.chat.completions.create(**request_kwargs)
+            def make_call():
+                return client.chat.completions.create(**request_kwargs)
+            
+            response = rate_limited_call(
+                bucket_name="stage7_other_resolutions",
+                call_fn=make_call,
+                max_retries=max_retries - attempt,
+                logger=logger
+            )
+            
             choices = getattr(response, "choices", None)
             if not choices:
                 raise RuntimeError("No choices returned from LLM")
@@ -352,6 +334,12 @@ def _call_llm(
                 )
             return parsed
 
+        except RateLimitExceeded as rle:
+            # Daily limit exceeded - don't retry
+            if logger:
+                logger.error(f"[{call_name}] Daily rate limit exceeded: {rle}")
+            raise
+
         except Exception as err1:
             status_code = _extract_error_status(err1)
             error_body = _extract_error_body(err1)
@@ -378,11 +366,9 @@ def _call_llm(
             is_rate_limit = status_code == 429 or "429" in str(err1) or "rate limit" in str(err1).lower()
 
             if is_rate_limit and attempt < max_retries:
-                wait_time = 2 ** attempt
+                # rate_limited_call handles 429 retry with backoff
                 if logger:
-                    logger.warning(f"[{call_name}] Rate limit, waiting {wait_time}s: {err1}")
-                print(f"  [LLM] Rate limit hit, waiting {wait_time}s before retry...")
-                time.sleep(wait_time)
+                    logger.warning(f"[{call_name}] Rate limit, will retry: {err1}")
                 continue
 
             is_json_error = (
@@ -429,10 +415,6 @@ def _call_llm(
             print(f"  [LLM] Falling back to model: {fallback_model}")
 
             try:
-                fb_wait = _token_bucket.take()
-                if fb_wait > 0:
-                    time.sleep(fb_wait)
-
                 fallback_request_kwargs = {
                     "model": fallback_model,
                     "messages": request_kwargs["messages"],
@@ -444,7 +426,16 @@ def _call_llm(
                 elif schema:
                     fallback_request_kwargs["response_format"] = {"type": "json_object"}
 
-                response = client.chat.completions.create(**fallback_request_kwargs)
+                def make_fallback_call():
+                    return client.chat.completions.create(**fallback_request_kwargs)
+                
+                response = rate_limited_call(
+                    bucket_name="stage7_other_resolutions",
+                    call_fn=make_fallback_call,
+                    max_retries=max_retries - attempt,
+                    logger=logger
+                )
+                
                 choices = getattr(response, "choices", None)
                 if not choices:
                     raise RuntimeError("Fallback returned no choices")
@@ -469,6 +460,11 @@ def _call_llm(
                 metadata["fallback_used"] = True
                 _write_metadata()
                 return parsed
+
+            except RateLimitExceeded as rle:
+                if logger:
+                    logger.error(f"[{call_name}] Fallback model also rate limited: {rle}")
+                raise
 
             except Exception as err2:
                 fb_status = _extract_error_status(err2)

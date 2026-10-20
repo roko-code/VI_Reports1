@@ -463,6 +463,82 @@ def _populate_voting_table(doc: docx.Document, resolutions: List[Dict],
             new_row.cells[2].text = asa_vote
 
 
+# The financial history table, in the order the rows must appear.  The
+# template supplies the rows that exist in it; anything missing is added, so
+# a template change does not silently drop a metric.
+FINANCIAL_TABLE_ROWS = [
+    ("Year", None),
+    ("NPAT ($m)", "npat"),
+    ("Underlying NPAT ($m)", "underlying_npat"),
+    ("Share Price ($)", "share_price"),
+    ("Dividend (cents)", "dividend"),
+    ("Dividends Paid (cents)", "dividend_paid"),
+    ("Simple TSR (%)", "simple_tsr"),
+    ("EPS (cents)", "eps"),
+    ("EPS - underlying (cents)", "underlying_eps"),
+    ("CEO Realised Rem ($m)", None),
+    ("CEO Statutory Rem ($m)", None),
+]
+
+
+def _normalise_label(text: str) -> str:
+    return re.sub(r"[^a-z]+", "", (text or "").lower())
+
+
+def _insert_table_row(table, index: int):
+    """Insert an empty row at ``index`` (python-docx has no insert API)."""
+    from copy import deepcopy
+
+    template = table.rows[min(1, len(table.rows) - 1)]
+    new_tr = deepcopy(template._tr)
+    tbl = table._tbl
+    existing = [child for child in tbl if child.tag.endswith("}tr")]
+    if index < len(existing):
+        tbl.insert(list(tbl).index(existing[index]), new_tr)
+    else:
+        tbl.append(new_tr)
+    return table.rows[index]
+
+
+def _layout_financial_table(table):
+    """Return {row key: row index} with the rows in report order.
+
+    Metric rows are keyed by their data key ("npat", "eps", ...); rows that
+    are filled separately are keyed by "label:<normalised label>".
+    """
+    wanted = [(label, _normalise_label(label), key) for label, key in FINANCIAL_TABLE_ROWS]
+    wanted_labels = {key for _, key, _ in wanted}
+
+    # Drop rows the template has that the report no longer uses, and keep the
+    # ones it does, so the row order can be rebuilt exactly.
+    keep = []
+    for index, row in enumerate(table.rows):
+        key = _normalise_label(row.cells[0].text)
+        if key in wanted_labels:
+            keep.append(index)
+    trs = [table.rows[i]._tr for i in keep]
+    for tr in trs:
+        table._tbl.remove(tr)
+    for tr in trs:
+        table._tbl.append(tr)
+
+    while len(table.rows) < len(wanted):
+        _insert_table_row(table, len(table.rows))
+
+    layout = {}
+    for index, (label, label_key, data_key) in enumerate(wanted):
+        if index >= len(table.rows):
+            break
+        try:
+            table.cell(index, 0).text = label
+        except IndexError:
+            continue
+        if data_key:
+            layout[data_key] = index
+        layout[f"label:{label_key}"] = index
+    return layout
+
+
 def _populate_financial_table(doc: docx.Document, perf_data: Dict[str, Any], year: int) -> None:
     """Populate the financial history table (Table 2)."""
     if len(doc.tables) < 3:
@@ -472,38 +548,47 @@ def _populate_financial_table(doc: docx.Document, perf_data: Dict[str, Any], yea
 
     years = perf_data.get("years", {})
     ceo_pay = perf_data.get("ceo_realised_pay", {})
+    ceo_statutory_pay = perf_data.get("ceo_statutory_pay", {})
 
     # Sort years descending (most recent first)
     sorted_years = sorted(years.keys(), key=lambda x: int(x), reverse=True)
 
+    layout = _layout_financial_table(table)
+
     # Fill year headers (columns 1-5)
+    header_row = layout.get("label:year", 0)
     for col_idx, fy in enumerate(sorted_years[:5], start=1):
         if col_idx < len(table.columns):
-            table.cell(0, col_idx).text = f"FY{fy}"
+            table.cell(header_row, col_idx).text = f"FY{fy}"
 
-    # Map row labels to data keys
-    row_labels = {
-        "NPAT ($m)": "npat",
-        "Underlying NPAT ($m)": "underlying_npat",
-        "Share Price ($)": "share_price",
-        "Dividend (cents)": "dividend",
-        "Simple TSR (%)": "simple_tsr",
-        "EPS (cents)": "eps",
-    }
+    def _fmt_number(key, value):
+        if value is None:
+            return "—"
+        if not isinstance(value, (int, float)):
+            return str(value)
+        if key in ("npat", "underlying_npat"):
+            return f"{value:,.0f}"
+        if key == "share_price":
+            return f"{value:.2f}"
+        if key in ("dividend", "dividend_paid", "eps", "underlying_eps"):
+            return f"{value:.1f}"
+        if key == "simple_tsr":
+            return f"{value:.2f}"
+        return f"{value:g}"
 
-    for row_idx, (label, key) in enumerate(row_labels.items(), start=1):
+    for key in ("npat", "underlying_npat", "share_price", "dividend", "dividend_paid",
+                "simple_tsr", "eps", "underlying_eps"):
+        row_idx = layout.get(key)
+        if row_idx is None:
+            continue
         for col_idx, fy in enumerate(sorted_years[:5], start=1):
             if col_idx >= len(table.columns) or row_idx >= len(table.rows):
                 continue
-            fy_data = years.get(fy, {})
-            val = fy_data.get(key)
-            if val is not None and isinstance(val, (int, float)):
-                table.cell(row_idx, col_idx).text = f"{val}"
-            else:
-                table.cell(row_idx, col_idx).text = "—"
+            table.cell(row_idx, col_idx).text = _fmt_number(key, years.get(fy, {}).get(key))
 
-    # CEO Realised Rem row (last row)
-    if len(table.rows) > 7:
+    # CEO Realised Rem row
+    realised_row = layout.get("label:ceorealisedremm")
+    if realised_row is not None:
         for col_idx, fy in enumerate(sorted_years[:5], start=1):
             if col_idx >= len(table.columns):
                 continue
@@ -520,11 +605,33 @@ def _populate_financial_table(doc: docx.Document, perf_data: Dict[str, Any], yea
             if val_aud is not None:
                 if currency != "AUD" and val_aud != val_src:
                     # Show both source currency and AUD
-                    table.cell(7, col_idx).text = f"${val_aud:.2f}m AUD (${val_src:.2f}m {currency} @ {fx_rate or 'N/A'})"
+                    table.cell(realised_row, col_idx).text = (
+                        f"${val_aud:.2f}m AUD (${val_src:.2f}m {currency} @ {fx_rate or 'N/A'})")
                 else:
-                    table.cell(7, col_idx).text = f"${val_aud:.2f}m"
+                    table.cell(realised_row, col_idx).text = f"${val_aud:.2f}m"
             else:
-                table.cell(7, col_idx).text = "\u2014"
+                table.cell(realised_row, col_idx).text = "\u2014"
+
+    # CEO Statutory Rem row
+    statutory_row = layout.get("label:ceostatutoryremm")
+    if statutory_row is not None:
+        for col_idx, fy in enumerate(sorted_years[:5], start=1):
+            if col_idx >= len(table.columns):
+                continue
+            pay_data = ceo_statutory_pay.get(fy, {})
+            val_aud = pay_data.get("value_aud_m")
+            if val_aud is None:
+                val_aud = pay_data.get("value_m")
+            val_src = pay_data.get("value_m")
+            currency = pay_data.get("currency", "AUD")
+            fx_rate = pay_data.get("fx_rate")
+            if val_aud is not None:
+                if currency != "AUD" and val_aud != val_src:
+                    table.cell(statutory_row, col_idx).text = f"${val_aud:.2f}m AUD (${val_src:.2f}m {currency} @ {fx_rate or 'N/A'})"
+                else:
+                    table.cell(statutory_row, col_idx).text = f"${val_aud:.2f}m"
+            else:
+                table.cell(statutory_row, col_idx).text = "\u2014"
 
 
 def _parse_money_value(text: str) -> str:
@@ -606,8 +713,57 @@ def _load_ar_framework(workspace_dir, ticker: str, year: int):
     return None
 
 
+def _extract_ceo_name(rem_markdown: str, perf_data: Dict[str, Any] = None) -> str:
+    """Find the CEO's name as the Annual Report states it.
+
+    Prefers the structured Stage 4 output (``notes`` on the CEO realised-pay
+    rows) and falls back to the remuneration assessment's own header line.
+    """
+    if perf_data:
+        for row in (perf_data.get("ceo_realised_pay") or {}).values():
+            notes = (row or {}).get("notes") or ""
+            match = re.search(r"CEO:\s*([A-Za-z][\w'\-]*(?:\s+[A-Z][\w'\-]*)*)", notes)
+            if match:
+                return match.group(1).strip()
+
+    if rem_markdown:
+        match = re.search(
+            r"CEO for the year[:\s*]*\**\s*([A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*)*)", rem_markdown
+        )
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _load_ar_framework_extended(workspace_dir, ticker: str, year: int, ceo_name: str):
+    """Derive the CEO remuneration framework from the Annual Report.
+
+    Used when the issuer does not publish the "Awarded Remuneration" table
+    that :func:`_load_ar_framework` looks for.  Returns a dict of target and
+    maximum components in $millions, or None.
+    """
+    if not ceo_name:
+        return None
+    try:
+        from ar_file_lookup import find_ar_file
+        from ar_text_cache import get_ar_pages
+        from logging_utils import TechnicalLogger
+        from remuneration_framework import extract_ceo_framework
+
+        ar_path = find_ar_file(workspace_dir, year, fallback=False,
+                               logger=TechnicalLogger(workspace_dir / "reports" / "technical_log.md"))
+        if not ar_path:
+            return None
+        ar_path = ar_path.path if hasattr(ar_path, "path") else ar_path
+        pages = get_ar_pages(ticker, year, ar_path)
+        logger = TechnicalLogger(workspace_dir / "reports" / "technical_log.md")
+        return extract_ceo_framework(pages, ceo_name, logger=logger)
+    except Exception:
+        return None
+
+
 def _populate_ceo_remuneration_table(doc: docx.Document, rem_markdown: str, workspace_dir=None,
-                                    ticker=None, year=None) -> None:
+                                    ticker=None, year=None, perf_data=None) -> None:
     """Populate Table 3 (CEO Remuneration Framework) from the remuneration assessment.
     
     Primary source is the Annual Report's own "Awarded Remuneration" table
@@ -637,27 +793,40 @@ def _populate_ceo_remuneration_table(doc: docx.Document, rem_markdown: str, work
     lti = None
 
     def _amount(text: str):
-        """Return a $-amount as a float in $millions, or None."""
-        m = re.search(r'\$\s*([\d.,]+)(?:\s*m)?', text, re.IGNORECASE)
+        """Return a $-amount as a float in $millions, or None.
+
+        Issuers state amounts in several units: "$1.715m", "$1,715 k" and
+        plain dollars.  The unit marker has to be honoured, otherwise a
+        thousands figure is read as dollars and the table renders 0.00.
+        """
+        m = re.search(r'\$\s*([\d.,]+)\s*(m|k|bn)?\b', text, re.IGNORECASE)
         if not m:
             return None
         val = float(m.group(1).replace(',', ''))
-        # A trailing 'm' means the figure is already in $millions.
-        return val if re.search(r'\$\s*[\d.,]+\s*m', text, re.IGNORECASE) else val / 1_000_000.0
+        unit = (m.group(2) or '').lower()
+        if unit == 'm':
+            return val
+        if unit == 'k':
+            return val / 1_000.0
+        if unit == 'bn':
+            return val * 1_000.0
+        return val / 1_000_000.0
+
+    _AMOUNT_RE = re.compile(r'\$\s*([\d.,]+)\s*(m|k|bn)?\b', re.IGNORECASE)
 
     for line in lines:
         if 'Target and maximum framework' not in line and not ('Fixed pay' in line and 'STI' in line and 'LTI' in line):
             continue
         # Classify each dollar amount by the phrase that precedes it, so the
         # parser tolerates each issuer's wording instead of a single template.
-        for amt in re.finditer(r'\$\s*([\d.,]+)(?:\s*m)?', line):
+        for amt in _AMOUNT_RE.finditer(line):
             val = _amount(amt.group(0))
             if val is None:
                 continue
             ctx = line[max(0, amt.start() - 70): amt.start()].lower()
             if fixed is None and 'fixed' in ctx:
                 fixed = val
-            elif ('maximum' in ctx or 'maximum' in line.lower()[amt.start() - 70: amt.start()] or 'max' in ctx) and 'profit share' in ctx:
+            elif ('maximum' in ctx or 'max' in ctx) and 'profit share' in ctx:
                 if sti_max_total is None:
                     sti_max_total = val
             elif 'profit share' in ctx:
@@ -702,6 +871,17 @@ def _populate_ceo_remuneration_table(doc: docx.Document, rem_markdown: str, work
         lti = lti_max = ar_lti
     targets = [fixed, sti_cash, sti_equity, lti]
     maxima = [fixed_max, sti_cash_max, sti_equity_max, lti_max]
+
+    # Fallback for issuers with no "Awarded Remuneration" table: derive the
+    # framework from the AR's own framework / STI outcomes disclosures.
+    if ar_fixed is None and workspace_dir is not None and ticker and year:
+        ceo_name = _extract_ceo_name(rem_markdown, perf_data)
+        framework = _load_ar_framework_extended(workspace_dir, ticker, year, ceo_name)
+        if framework:
+            targets = [framework["fixed"], framework["sti_cash"],
+                       framework["sti_equity"], framework["lti"]]
+            maxima = [framework["max_fixed"], framework["max_sti_cash"],
+                      framework["max_sti_equity"], framework["max_lti"]]
 
     def _fmt(v):
         return f"{v:.2f}" if v is not None else "\u2014"
@@ -1130,7 +1310,8 @@ def run_report_rendering(
     if rem_markdown:
         _populate_ceo_remuneration_table(doc, rem_markdown,
                                         workspace_dir=workspace_dir,
-                                        ticker=ticker, year=year)
+                                        ticker=ticker, year=year,
+                                        perf_data=perf_data)
 
     # Replace simple placeholders
     _replace_placeholders(doc, {

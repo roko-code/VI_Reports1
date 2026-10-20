@@ -24,9 +24,20 @@ If found, extract for every year shown:
 - npat (statutory, $m)
 - underlying_npat ($m) — see definition below
 - share_price ($, as at FY end, AS DISCLOSED — do not round)
-- dividend (cents/share, AS DISCLOSED — do not round)
+- dividend (cents/share, AS DISCLOSED — do not round) — the dividends DECLARED 
+  for that financial year
+- dividend_paid (cents/share) — only when the table row is explicitly about 
+  dividends PAID during the year (e.g. "Total dividends paid during the 
+  year", with a footnote saying it refers to dividends paid and not 
+  declared). Use null otherwise. Dividends paid are what a total shareholder 
+  return includes, so they must not be confused with declared dividends.
 - simple_tsr (%) — only if reported directly; do not calculate here
-- eps (cents, AS DISCLOSED — do not round)
+- eps (cents, AS DISCLOSED — do not round) — the statutory / reported earnings 
+  per share
+- underlying_eps (cents) — only when the table separately discloses an 
+  underlying / adjusted earnings per share (e.g. "EPS – underlying (cps)"). 
+  Use null when only one EPS is disclosed. Keep the two apart: the reported 
+  EPS and the underlying EPS are different measures.
 - revenue, net_assets, roe, roce ($m/%, optional — only if present)
 
 Do NOT extract CEO remuneration in this prompt — that is handled separately and 
@@ -85,8 +96,10 @@ If you are unsure of the unit, cite the source page and note the unit in underly
       "share_price": null, "share_price_source_page": null,
       "share_price_restated": false, "share_price_restatement_note": "",
       "dividend": null, "dividend_source_page": null,
+      "dividend_paid": null, "dividend_paid_source_page": null,
       "simple_tsr": null, "simple_tsr_source_page": null, "tsr_mismatch": false,
       "eps": null, "eps_source_page": null,
+      "underlying_eps": null, "underlying_eps_source_page": null,
       "revenue": null, "net_assets": null, "roe": null, "roce": null,
       "repeated_value_flag": false,
       "extracted_from_latest_ar": true,

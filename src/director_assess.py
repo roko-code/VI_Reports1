@@ -13,6 +13,7 @@ from citation_check import check_citations, format_problems
 from news_search_results import load_news_block
 from ar_file_lookup import find_ar_file as _find_ar_file_lookup, parse_year_from_stem
 from llm_config import director_assess_models
+from rate_limiter import get_bucket, rate_limited_call, RateLimitExceeded
 
 # Environment setup
 load_dotenv(find_dotenv())
@@ -30,6 +31,9 @@ AR_BUDGET_CHARS = int(os.getenv("AR_BUDGET_CHARS", "200000"))
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
+
+# Shared rate limiter bucket for Stage 6
+_rate_bucket = get_bucket("stage6_director_assess")
 
 
 def load_prompt(filename: str) -> str:
@@ -100,12 +104,25 @@ def call_llm_with_fallback(client: OpenAI, system_prompt: str, user_payload: str
         print(f" Requesting assessment via primary model ({DIRECTOR_ASSESS_PRIMARY_MODEL}) with Web Search...")
         if logger:
             logger.info(f"Requesting assessment via primary model ({DIRECTOR_ASSESS_PRIMARY_MODEL}) with Web Search...")
-        response = client.chat.completions.create(
-            model=DIRECTOR_ASSESS_PRIMARY_MODEL,
-            messages=messages,
-            tools=web_search_tool
+        
+        def make_call():
+            return client.chat.completions.create(
+                model=DIRECTOR_ASSESS_PRIMARY_MODEL,
+                messages=messages,
+                tools=web_search_tool
+            )
+        
+        response = rate_limited_call(
+            bucket_name="stage6_director_assess",
+            call_fn=make_call,
+            max_retries=3,
+            logger=logger
         )
         return response.choices[0].message.content.strip()
+    except RateLimitExceeded as rle:
+        if logger:
+            logger.error(f"Daily rate limit exceeded: {rle}")
+        raise
     except Exception as err1:
         print(f" Primary model with web search tool failed: {err1}")
         if logger:
@@ -116,12 +133,25 @@ def call_llm_with_fallback(client: OpenAI, system_prompt: str, user_payload: str
         print(f" Switching to fallback model ({DIRECTOR_ASSESS_FALLBACK_MODEL}) with Web Search...")
         if logger:
             logger.info(f"Switching to fallback model ({DIRECTOR_ASSESS_FALLBACK_MODEL}) with Web Search...")
-        response = client.chat.completions.create(
-            model=DIRECTOR_ASSESS_FALLBACK_MODEL,
-            messages=messages,
-            tools=web_search_tool
+        
+        def make_fallback_call():
+            return client.chat.completions.create(
+                model=DIRECTOR_ASSESS_FALLBACK_MODEL,
+                messages=messages,
+                tools=web_search_tool
+            )
+        
+        response = rate_limited_call(
+            bucket_name="stage6_director_assess",
+            call_fn=make_fallback_call,
+            max_retries=3,
+            logger=logger
         )
         return response.choices[0].message.content.strip()
+    except RateLimitExceeded as rle:
+        if logger:
+            logger.error(f"Daily rate limit exceeded: {rle}")
+        raise
     except Exception as err2:
         print(f" Fallback model with web search tool failed: {err2}")
         if logger:
@@ -131,9 +161,18 @@ def call_llm_with_fallback(client: OpenAI, system_prompt: str, user_payload: str
     print(f" Executing standard assessment via {DIRECTOR_ASSESS_FALLBACK_MODEL} (No Web Search)...")
     if logger:
         logger.info(f"Executing standard assessment via {DIRECTOR_ASSESS_FALLBACK_MODEL} (No Web Search)...")
-    response = client.chat.completions.create(
-        model=DIRECTOR_ASSESS_FALLBACK_MODEL,
-        messages=messages
+    
+    def make_standard_call():
+        return client.chat.completions.create(
+            model=DIRECTOR_ASSESS_FALLBACK_MODEL,
+            messages=messages
+        )
+    
+    response = rate_limited_call(
+        bucket_name="stage6_director_assess",
+        call_fn=make_standard_call,
+        max_retries=3,
+        logger=logger
     )
     return response.choices[0].message.content.strip()
 
@@ -269,10 +308,10 @@ def run_director_assessment(json_path: Path, ar_path: Path, asa_text: str, clien
     if logger:
         logger.info(f"Report saved: {report_path.name}")
 
-    # Move processed inputs to archive directories
+    # Copy processed inputs to archive directories (keep original in active dir)
     if archive_dir:
         archive_dir.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(json_path), str(archive_dir / json_path.name))
+        shutil.copy2(str(json_path), str(archive_dir / json_path.name))
         print(f" Archived inputs to processed directories.")
         if logger:
             logger.info(f"Archived {json_path.name} to notices_archived")

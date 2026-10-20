@@ -16,7 +16,7 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\jurok\VI_Reports1")
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import performance_table as pt  # noqa: E402
@@ -147,6 +147,7 @@ check("ceo_served_part_year accepts null",
       str(props["ceo_served_part_year"]["type"]))
 disclosed_answer = {"ceo_name": "X", "target_fy": "2026", "source_method": "disclosed",
                     "ceo_realised_rem": 6.63, "ceo_served_part_year": None,
+                    "ceo_statutory_rem": 7.04,
                     "not_disclosed_reason": None}
 try:
     jsonschema.validate(disclosed_answer, pt.PROMPT_3_SCHEMA)

@@ -19,12 +19,13 @@ from openai import OpenAI
 
 from logging_utils import write_supporting_json, write_supporting_text, TechnicalLogger
 from ar_text_cache import get_ar_pages
-from ar_retrieval import STAGE5_SPECS, build_context, write_manifest
+from ar_retrieval import STAGE5_SPECS, NOM_SPECS, build_context, write_manifest
 from citation_check import check_citations, format_problems
 from disclosure_check import check_disclosed_realised
 from news_search_results import load_news_block, has_news_results
 from ar_file_lookup import find_ar_file as _find_ar_file_lookup
 from llm_config import rem_assess_models
+from rate_limiter import get_bucket, rate_limited_call, RateLimitExceeded
 
 load_dotenv(find_dotenv())
 
@@ -51,30 +52,8 @@ PRIOR_AR_BUDGET_CHARS = int(os.getenv("PRIOR_AR_BUDGET_CHARS", "120000"))
 # larger ones, including explanatory notes on remuneration deferral.
 NOM_BUDGET_CHARS = int(os.getenv("NOM_BUDGET_CHARS", "120000"))
 
-
-# Token bucket rate limiter
-class TokenBucket:
-    def __init__(self, rate_per_minute: int = 18):
-        self.rate = rate_per_minute / 60.0
-        self.tokens = rate_per_minute
-        self.last = time.time()
-
-    def take(self):
-        now = time.time()
-        elapsed = now - self.last
-        if elapsed > 0:
-            self.tokens = min(self.rate * elapsed + self.tokens, self.rate * 60)
-        if self.tokens >= 1:
-            self.tokens -= 1
-            self.last = now
-            return 0
-        wait = (1 - self.tokens) / self.rate
-        self.tokens = 0
-        self.last = now
-        time.sleep(wait)
-        return wait
-
-_token_bucket = TokenBucket(20)  # 20 RPM = 3s between calls
+# Shared rate limiter bucket for Stage 5
+_rate_bucket = get_bucket("stage5_remuneration")
 
 
 def _load_prompt(filename: str) -> str:
@@ -160,6 +139,31 @@ def _extract_pdf_text(pdf_path: Path) -> str:
     return text
 
 
+def _extract_nom_pages(pdf_path: Path) -> list[dict]:
+    """
+    Extract page-by-page text from a NoM PDF, returning list of page dicts
+    compatible with ar_retrieval.build_context.
+    """
+    import pdfplumber
+    from ar_retrieval import is_unusable_text, usable_page_text
+    
+    pages = []
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        for idx, page in enumerate(pdf.pages, start=1):
+            page_text = page.extract_text() or ""
+            usable = not is_unusable_text(page_text)
+            if not usable:
+                page_text = ""
+            else:
+                page_text = usable_page_text(page_text)
+            pages.append({
+                "page_number": idx,
+                "text": page_text,
+                "usable": usable,
+                "char_count": len(page_text),
+            })
+    return pages
+
 
 def _extract_error_status(err: Exception) -> Optional[int]:
     """Extract HTTP status code from an OpenAI/OpenRouter error."""
@@ -236,7 +240,7 @@ def _call_llm_text(
     user_content: str,
     logger=None,
     fallback_model: str = None,
-    max_retries: int = 3,
+    max_retries: int = 5,
     call_name: str = "llm_call",
     supporting_data_dir: Path = None,
 ) -> str:
@@ -258,13 +262,6 @@ def _call_llm_text(
         metadata["elapsed_seconds"] = round(time.time() - call_start, 2)
         _write_llm_call_metadata(supporting_data_dir, call_name, metadata)
 
-    wait = _token_bucket.take()
-    if wait > 0:
-        metadata["rate_limit_wait_seconds"] = wait
-        if logger:
-            logger.info(f"[{call_name}] Rate limiting: waiting {wait:.1f}s")
-        time.sleep(wait)
-
     request_kwargs = {
         "model": model,
         "messages": [
@@ -277,7 +274,17 @@ def _call_llm_text(
     primary_error = None
     for attempt in range(max_retries + 1):
         try:
-            response = client.chat.completions.create(**request_kwargs)
+            # Use shared rate limiter with 429 handling
+            def make_call():
+                return client.chat.completions.create(**request_kwargs)
+            
+            response = rate_limited_call(
+                bucket_name="stage5_remuneration",
+                call_fn=make_call,
+                max_retries=max_retries - attempt,  # Remaining retries
+                logger=logger
+            )
+            
             choices = getattr(response, "choices", None)
             if not choices:
                 error_msg = f"No choices returned from LLM (possible rate limit). Response id: {getattr(response, 'id', 'N/A')}"
@@ -315,6 +322,12 @@ def _call_llm_text(
                 )
             return content
 
+        except RateLimitExceeded as rle:
+            # Daily limit exceeded - don't retry
+            if logger:
+                logger.error(f"[{call_name}] Daily rate limit exceeded: {rle}")
+            raise
+
         except Exception as err1:
             status_code = _extract_error_status(err1)
             error_body = _extract_error_body(err1)
@@ -341,11 +354,10 @@ def _call_llm_text(
             is_rate_limit = status_code == 429 or "429" in str(err1) or "rate limit" in str(err1).lower()
 
             if is_rate_limit and attempt < max_retries:
-                wait_time = 2 ** attempt
+                # rate_limited_call already handles 429 retry with backoff
+                # This is a fallback for any edge cases
                 if logger:
-                    logger.warning(f"[{call_name}] Rate limit hit (attempt {attempt + 1}/{max_retries + 1}), waiting {wait_time}s: {err1}")
-                print(f"  [LLM] Rate limit hit, waiting {wait_time}s before retry...")
-                time.sleep(wait_time)
+                    logger.warning(f"[{call_name}] Rate limit hit (attempt {attempt + 1}/{max_retries + 1}), will retry")
                 continue
 
             primary_error = err1
@@ -371,11 +383,16 @@ def _call_llm_text(
             }
 
             try:
-                fb_wait = _token_bucket.take()
-                if fb_wait > 0:
-                    time.sleep(fb_wait)
-
-                response = client.chat.completions.create(**fallback_request_kwargs)
+                def make_fallback_call():
+                    return client.chat.completions.create(**fallback_request_kwargs)
+                
+                response = rate_limited_call(
+                    bucket_name="stage5_remuneration",
+                    call_fn=make_fallback_call,
+                    max_retries=max_retries - attempt,
+                    logger=logger
+                )
+                
                 choices = getattr(response, "choices", None)
                 if not choices:
                     error_msg = f"Fallback model also returned no choices. Response id: {getattr(response, 'id', 'N/A')}"
@@ -412,6 +429,11 @@ def _call_llm_text(
                         f"[{call_name}] fallback success: model={fallback_model} elapsed={round(time.time() - call_start, 2):.1f}s"
                     )
                 return content
+
+            except RateLimitExceeded as rle:
+                if logger:
+                    logger.error(f"[{call_name}] Fallback model also rate limited: {rle}")
+                raise
 
             except Exception as err2:
                 fb_status = _extract_error_status(err2)
@@ -536,9 +558,29 @@ def run_remuneration_assessment(
         logger.warning("No current annual report found.")
 
     if nom_path:
-        logger.info(f"Extracting NoM text")
-        nom_text = _extract_pdf_text(nom_path)
-        logger.info(f"NoM text length: {len(nom_text)} chars")
+        logger.info(f"Extracting NoM pages for retrieval")
+        nom_pages = _extract_nom_pages(nom_path)
+        logger.info(f"NoM pages extracted: {len(nom_pages)}")
+        nom_retrieval = build_context(
+            nom_pages,
+            NOM_SPECS,
+            budget_chars=NOM_BUDGET_CHARS,
+            logger=logger,
+        )
+        nom_text = nom_retrieval.text
+        if supporting_data_dir:
+            write_manifest(
+                nom_retrieval, supporting_data_dir, "stage5_nom", ticker, year, logger=logger
+            )
+        logger.info(
+            f"NoM retrieval: {len(nom_retrieval.included_pages)}/{nom_retrieval.total_pages} pages, "
+            f"{nom_retrieval.chars_used:,} chars"
+        )
+        if nom_retrieval.missing_mandatory:
+            logger.warning(
+                "Stage 5 NoM could not locate mandatory sections: "
+                + ", ".join(nom_retrieval.missing_mandatory)
+            )
     else:
         nom_text = ""
         logger.warning("No Notice of Meeting found.")
@@ -597,10 +639,16 @@ def run_remuneration_assessment(
     # position, because the statutory pay table, realised remuneration and
     # malus/clawback disclosures sit well past the first 80,000 characters in
     # every report measured.
+    # The NoM is also retrieved by section using NOM_SPECS.
     ar_text_trunc = ar_text if ar_text else "NOT SUPPLIED"
-    nom_text_trunc = nom_text[:NOM_BUDGET_CHARS] if nom_text else "NOT SUPPLIED"
+    nom_text_trunc = nom_text if nom_text else "NOT SUPPLIED"
     prior_ar_text_trunc = prior_ar_text if prior_ar_text else "NOT SUPPLIED"
     coverage_note = ar_retrieval.coverage_note() if ar_retrieval else "NOT SUPPLIED"
+    
+    # Add NoM coverage note if available
+    nom_coverage_note = ""
+    if 'nom_retrieval' in locals() and nom_retrieval:
+        nom_coverage_note = f"\nNoM Coverage: {nom_retrieval.coverage_note()}"
 
     prior_asa_block = "NOT SUPPLIED"
     if prior_vi_text or prior_meeting_text:
@@ -618,11 +666,12 @@ COMPANY: {ticker}
 FINANCIAL_YEAR: {year}
 
 {coverage_note}
+{nom_coverage_note}
 
 === DOCUMENT 1: CURRENT ANNUAL REPORT (retrieved sections) ===
 {ar_text_trunc}
 
-=== DOCUMENT 2: NOTICE OF MEETING ===
+=== DOCUMENT 2: NOTICE OF MEETING (retrieved sections) ===
 {nom_text_trunc}
 
 === DOCUMENT 4: PRIOR YEAR ANNUAL REPORT (if available) ===

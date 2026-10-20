@@ -29,6 +29,7 @@ from openai import OpenAI
 from logging_utils import write_supporting_json, write_supporting_text, TechnicalLogger
 from news_search_results import load_news_block
 from llm_config import text_summary_models
+from rate_limiter import get_bucket, rate_limited_call, RateLimitExceeded
 
 load_dotenv(find_dotenv())
 
@@ -41,29 +42,8 @@ TEXT_SUMMARY_MODEL, TEXT_SUMMARY_FALLBACK_MODEL = text_summary_models()
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
 
-
-class TokenBucket:
-    def __init__(self, rate_per_minute: int = 20):
-        self.rate = rate_per_minute / 60.0
-        self.tokens = rate_per_minute
-        self.last = time.time()
-
-    def take(self):
-        now = time.time()
-        elapsed = now - self.last
-        if elapsed > 0:
-            self.tokens = min(self.rate * elapsed + self.tokens, self.rate * 60)
-        if self.tokens >= 1:
-            self.tokens -= 1
-            self.last = now
-            return 0
-        wait = (1 - self.tokens) / self.rate
-        self.tokens = 0
-        self.last = now
-        time.sleep(wait)
-        return wait
-
-_token_bucket = TokenBucket(20)
+# Shared rate limiter bucket for Stage 8
+_rate_bucket = get_bucket("stage8_text_summaries")
 
 
 def _load_prompt(filename: str) -> str:
@@ -80,7 +60,7 @@ def _call_llm_text(
     user_content: str,
     logger=None,
     fallback_model: Optional[str] = None,
-    max_retries: int = 3,
+    max_retries: int = 5,
     call_name: str = "llm_call",
     supporting_data_dir: Optional[Path] = None,
 ) -> str:
@@ -98,8 +78,17 @@ def _call_llm_text(
 
     for attempt in range(max_retries + 1):
         try:
-            _token_bucket.take()
-            response = client.chat.completions.create(**request_kwargs)
+            # Use shared rate limiter with 429 handling
+            def make_call():
+                return client.chat.completions.create(**request_kwargs)
+            
+            response = rate_limited_call(
+                bucket_name="stage8_text_summaries",
+                call_fn=make_call,
+                max_retries=max_retries - attempt,
+                logger=logger
+            )
+            
             choices = getattr(response, "choices", None)
             if not choices:
                 raise RuntimeError(f"No choices returned from LLM (possible rate limit)")
@@ -113,10 +102,18 @@ def _call_llm_text(
                 logger.info(f"[{call_name}] success: model={model} elapsed={round(time.time() - call_start, 1)}s")
             return content
 
+        except RateLimitExceeded as rle:
+            # Daily limit exceeded - don't retry
+            if logger:
+                logger.error(f"[{call_name}] Daily rate limit exceeded: {rle}")
+            raise
+
         except Exception as err:
             if attempt < max_retries:
                 if logger:
                     logger.warning(f"[{call_name}] error (attempt {attempt + 1}/{max_retries + 1}): {str(err)[:300]}")
+                # rate_limited_call handles 429 retry with backoff
+                # Small additional delay for other errors
                 time.sleep(2 ** attempt)
                 continue
 
@@ -124,17 +121,31 @@ def _call_llm_text(
                 if logger:
                     logger.info(f"[{call_name}] Falling back to {fallback_model}")
                 try:
-                    _token_bucket.take()
-                    fb_response = client.chat.completions.create(
-                        model=fallback_model,
-                        messages=request_kwargs["messages"],
-                        timeout=120.0
+                    fallback_request_kwargs = {
+                        "model": fallback_model,
+                        "messages": request_kwargs["messages"],
+                        "timeout": 120.0
+                    }
+                    
+                    def make_fallback_call():
+                        return client.chat.completions.create(**fallback_request_kwargs)
+                    
+                    fb_response = rate_limited_call(
+                        bucket_name="stage8_text_summaries",
+                        call_fn=make_fallback_call,
+                        max_retries=max_retries - attempt,
+                        logger=logger
                     )
+                    
                     content = fb_response.choices[0].message.content
                     if content and content.strip():
                         if logger:
                             logger.info(f"[{call_name}] fallback success: model={fallback_model}")
                         return content.strip()
+                except RateLimitExceeded as rle:
+                    if logger:
+                        logger.error(f"[{call_name}] Fallback model also rate limited: {rle}")
+                    raise
                 except Exception as fb_err:
                     if logger:
                         logger.error(f"[{call_name}] fallback also failed: {str(fb_err)[:300]}")
@@ -263,9 +274,19 @@ def _build_summary_payload(
                     parts.append(f"  - Missing: {', '.join(missing)}")
 
         ceo_pay = perf_data.get("ceo_realised_pay", {})
+        ceo_statutory_pay = perf_data.get("ceo_statutory_pay", {})
         if ceo_pay:
             parts.append("\n### CEO Realised Pay:")
             for fy, pay_data in sorted(ceo_pay.items()):
+                parts.append(f"\n  FY{fy}: ${pay_data.get('value_m', 0)}m")
+                parts.append(f"    - Method: {pay_data.get('source_method', 'N/A')}")
+                parts.append(f"    - Page: {pay_data.get('source_page', 'N/A')}")
+                notes = pay_data.get("notes", "")
+                if notes:
+                    parts.append(f"    - Notes: {notes}")
+        if ceo_statutory_pay:
+            parts.append("\n### CEO Statutory Pay:")
+            for fy, pay_data in sorted(ceo_statutory_pay.items()):
                 parts.append(f"\n  FY{fy}: ${pay_data.get('value_m', 0)}m")
                 parts.append(f"    - Method: {pay_data.get('source_method', 'N/A')}")
                 parts.append(f"    - Page: {pay_data.get('source_page', 'N/A')}")

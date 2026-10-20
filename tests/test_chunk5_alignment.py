@@ -22,7 +22,7 @@ cannot fire on a single REM-S14 concern alone.
 import sys
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\jurok\VI_Reports1")
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 PROMPT = (ROOT / "prompts" / "rem_assess.txt").read_text(encoding="utf-8")

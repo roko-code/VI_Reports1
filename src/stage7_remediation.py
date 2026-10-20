@@ -212,6 +212,7 @@ def _apply_correction(workspace_dir: Path, issue: Dict, corrected_value: Any, ci
         
         years = perf_data.get("years", {})
         ceo_pay = perf_data.get("ceo_realised_pay", {})
+        ceo_statutory_pay = perf_data.get("ceo_statutory_pay", {})
         
         # Check financial metrics
         for metric_key in ["npat", "underlying_npat", "revenue", "net_assets", "share_price", "dividend", "eps"]:
@@ -228,6 +229,13 @@ def _apply_correction(workspace_dir: Path, issue: Dict, corrected_value: Any, ci
                 ceo_pay[fy]["value_m"] = corrected_value
                 ceo_pay[fy]["source_page"] = citation
                 changed = f"FY{fy} CEO realised pay: ${old_val}m -> ${corrected_value}m (source: {citation})"
+        
+        if not changed and fy in ceo_statutory_pay:
+            old_val = ceo_statutory_pay[fy].get("value_m")
+            if old_val is not None:
+                ceo_statutory_pay[fy]["value_m"] = corrected_value
+                ceo_statutory_pay[fy]["source_page"] = citation
+                changed = f"FY{fy} CEO statutory pay: ${old_val}m -> ${corrected_value}m (source: {citation})"
         
         if changed:
             with open(perf_path, "w", encoding="utf-8") as f:
