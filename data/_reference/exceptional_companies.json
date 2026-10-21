@@ -37,6 +37,11 @@
     "CSL": {
         "type": "split_remuneration",
         "description": "Remuneration report filed separately from annual report",
-        "additional_keywords": ["Remuneration Report", "Remuneration Statement", "Director Remuneration"]
+        "additional_keywords": ["Remuneration Report", "Remuneration Statement", "Director Remuneration", "Management Information Circular"]
+    },
+    "CSC": {
+        "type": "split_remuneration",
+        "description": "Remuneration report filed separately from annual report as Management Information Circular",
+        "additional_keywords": ["Management Information Circular", "Remuneration Report", "Remuneration Statement", "Director Remuneration"]
     }
 }
