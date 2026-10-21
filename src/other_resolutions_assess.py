@@ -25,7 +25,7 @@ from ar_retrieval import STAGE7_SPECS, build_context, write_manifest
 from ar_file_lookup import find_ar_file as _find_ar_file_lookup
 from llm_json import parse_llm_json
 from news_search_results import load_news_block
-from llm_config import other_resolutions_models
+from llm_config import LLM_TIMEOUT_SECONDS_LONG, other_resolutions_models
 from rate_limiter import get_bucket, rate_limited_call, RateLimitExceeded
 
 load_dotenv(find_dotenv())
@@ -44,7 +44,10 @@ PROMPTS_DIR = BASE_DIR / "prompts"
 AR_BUDGET_CHARS = int(os.getenv("AR_BUDGET_CHARS", "250000"))
 
 # Shared rate limiter bucket for Stage 7
-_rate_bucket = get_bucket("stage7_other_resolutions")
+_rate_bucket = get_bucket(
+    "stage7_other_resolutions",
+    models=(OTHER_RESOLUTIONS_PRIMARY_MODEL, OTHER_RESOLUTIONS_FALLBACK_MODEL),
+)
 
 # Response format capability cache
 _RESPONSE_FORMAT_SUPPORT = {}
@@ -266,7 +269,7 @@ def _call_llm(
             {"role": "system", "content": prompt_text},
             {"role": "user", "content": user_content}
         ],
-        "timeout": 240.0
+        "timeout": LLM_TIMEOUT_SECONDS_LONG
     }
     if use_strict_json and schema:
         request_kwargs["response_format"] = {
@@ -418,7 +421,7 @@ def _call_llm(
                 fallback_request_kwargs = {
                     "model": fallback_model,
                     "messages": request_kwargs["messages"],
-                    "timeout": 240.0
+                    "timeout": LLM_TIMEOUT_SECONDS_LONG
                 }
                 use_strict_fallback = _check_response_format_support(fallback_model)
                 if use_strict_fallback and schema:

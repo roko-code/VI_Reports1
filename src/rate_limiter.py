@@ -29,10 +29,36 @@ load_dotenv(find_dotenv())
 # Configuration from environment (with free-tier defaults)
 FREE_TIER_RPM = int(os.getenv("FREE_TIER_RPM", "20"))
 FREE_TIER_DAILY_LIMIT = int(os.getenv("FREE_TIER_DAILY_LIMIT", "50"))
+RATE_LIMIT_MODE = os.getenv("RATE_LIMIT_MODE", "auto").strip().lower()
 RATE_LIMIT_STATE_DIR = Path(os.getenv("RATE_LIMIT_STATE_DIR", str(Path(__file__).resolve().parent.parent / "data" / "_rate_limit")))
-
-RATE_LIMIT_STATE_DIR.mkdir(parents=True, exist_ok=True)
 DAILY_COUNT_FILE = RATE_LIMIT_STATE_DIR / "daily_count.json"
+
+
+def _ensure_state_dir() -> None:
+    """Create the rate-limit state directory lazily, only when needed."""
+    RATE_LIMIT_STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def is_free_model(model: str | None) -> bool:
+    """True if the model id carries the OpenRouter free-tier `:free` suffix."""
+    return bool(model) and model.strip().lower().endswith(":free")
+
+
+def resolve_limits(models, rpm: int, daily_limit: int):
+    """Resolve the effective RPM/daily limit for a stage.
+
+    ``auto`` (default) applies rate limiting only when at least one of the
+    stage's models is a free model; paid models run without throttling unless
+    ``RATE_LIMIT_MODE=on`` forces it.  ``off`` never limits.
+    """
+    if RATE_LIMIT_MODE == "off":
+        return None, None
+    if RATE_LIMIT_MODE == "on":
+        return rpm, daily_limit
+    if any(is_free_model(m) for m in (models or ())):
+        return rpm, daily_limit
+    return None, None
+
 
 # Global lock for daily counter
 _daily_lock = threading.Lock()
@@ -63,17 +89,21 @@ class TokenBucket:
         self,
         rpm: int = FREE_TIER_RPM,
         daily_limit: int = FREE_TIER_DAILY_LIMIT,
+        enabled: bool = True,
         name: str = "default",
-        logger=None
+        logger=None,
+        models=None
     ):
         self.rpm = rpm
         self.daily_limit = daily_limit
+        self.enabled = enabled
         self.name = name
         self.logger = logger
+        self.models = tuple(models) if models else None
         
         # Token bucket state
-        self.rate = rpm / 60.0  # tokens per second
-        self.tokens = float(rpm)
+        self.rate = rpm / 60.0 if rpm is not None else 0.0  # tokens per second
+        self.tokens = float(rpm) if enabled and rpm is not None else 0.0
         self.last = time.time()
         self._lock = threading.Lock()
         
@@ -81,8 +111,12 @@ class TokenBucket:
         self.backoff_until = 0.0
         self.consecutive_429s = 0
         
-        # Load daily count
-        self._load_daily_count()
+        # Load daily count only when limiting is active
+        if enabled:
+            _ensure_state_dir()
+            self._load_daily_count()
+        else:
+            self.daily_count = 0
     
     def _load_daily_count(self) -> None:
         """Load today's request count from disk."""
@@ -116,6 +150,8 @@ class TokenBucket:
     
     def check_daily_limit(self) -> None:
         """Check if daily limit exceeded, raise if so."""
+        if not self.enabled:
+            return
         if self.daily_count >= self.daily_limit:
             # Calculate seconds until midnight
             now = datetime.now()
@@ -132,6 +168,8 @@ class TokenBucket:
         Take a token, blocking until available.
         Returns wait time in seconds (0 if immediate).
         """
+        if not self.enabled:
+            return 0.0
         # Check daily limit first
         self.check_daily_limit()
         
@@ -229,11 +267,24 @@ _buckets: dict[str, TokenBucket] = {}
 _buckets_lock = threading.Lock()
 
 
-def get_bucket(name: str, rpm: int = FREE_TIER_RPM, daily_limit: int = FREE_TIER_DAILY_LIMIT, logger=None) -> TokenBucket:
-    """Get or create a named token bucket (singleton per name)."""
+def get_bucket(name: str, rpm: int = FREE_TIER_RPM, daily_limit: int = FREE_TIER_DAILY_LIMIT, models=None, logger=None) -> TokenBucket:
+    """Get or create a named token bucket (singleton per name).
+
+    ``models`` is the stage's primary/fallback model pair; when at least one is
+    a free model (and ``RATE_LIMIT_MODE=auto``) rate limiting applies.
+    """
+    effective_rpm, effective_daily = resolve_limits(models, rpm, daily_limit)
+    enabled = effective_rpm is not None
     with _buckets_lock:
         if name not in _buckets:
-            _buckets[name] = TokenBucket(rpm=rpm, daily_limit=daily_limit, name=name, logger=logger)
+            _buckets[name] = TokenBucket(
+                rpm=effective_rpm,
+                daily_limit=effective_daily,
+                enabled=enabled,
+                name=name,
+                logger=logger,
+                models=models,
+            )
         return _buckets[name]
 
 
@@ -298,7 +349,9 @@ def rate_limited_call(
                 "429" in err_str or
                 "rate limit" in err_str or
                 "too many requests" in err_str or
-                "quota exceeded" in err_str
+                # A billing/quota error is not a throttle: never retry it when
+                # rate limiting is disabled (paid model).
+                ("quota exceeded" in err_str and bucket.enabled)
             )
             
             if is_429 and attempt < max_retries:

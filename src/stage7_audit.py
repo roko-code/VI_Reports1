@@ -19,7 +19,7 @@ from openai import OpenAI
 from logging_utils import write_supporting_json, write_supporting_text
 from news_search_results import load_news_block, has_news_results
 from llm_json import parse_llm_json
-from llm_config import audit_models
+from llm_config import LLM_TIMEOUT_SECONDS, audit_models
 from rate_limiter import get_bucket, rate_limited_call, RateLimitExceeded
 
 load_dotenv(find_dotenv())
@@ -34,7 +34,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
 
 # Shared rate limiter bucket for Stage 7 Audit
-_rate_bucket = get_bucket("stage7_audit")
+_rate_bucket = get_bucket(
+    "stage7_audit",
+    models=(AUDIT_PRIMARY_MODEL, AUDIT_FALLBACK_MODEL),
+)
 
 
 def _count_uncertain_rows(text: str) -> int:
@@ -514,7 +517,7 @@ Output as JSON:
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": audit_user_content}
                 ],
-                timeout=120.0
+                timeout=LLM_TIMEOUT_SECONDS
             )
         
         try:
@@ -546,7 +549,7 @@ Output as JSON:
                     model=AUDIT_FALLBACK_MODEL,
                     messages=[{"role": "system", "content": prompt},
                             {"role": "user", "content": audit_user_content}],
-                    timeout=120.0
+                    timeout=LLM_TIMEOUT_SECONDS
                 )
             
             try:

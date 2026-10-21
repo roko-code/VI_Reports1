@@ -16,7 +16,7 @@ from ar_text_cache import get_ar_pages
 from ar_retrieval import (build_context, write_manifest,
                          STAGE4_FINANCIAL_SPECS, STAGE4_REMUNERATION_SPECS)
 from pipeline_db import init_run_db
-from llm_config import performance_models
+from llm_config import LLM_TIMEOUT_SECONDS_LONG, performance_models
 from rate_limiter import get_bucket, rate_limited_call, RateLimitExceeded
 
 load_dotenv(find_dotenv())
@@ -29,7 +29,10 @@ PERFORMANCE_MODEL, PERFORMANCE_FALLBACK_MODEL = performance_models()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Shared rate limiter bucket for Stage 4
-_rate_bucket = get_bucket("stage4_performance_table")
+_rate_bucket = get_bucket(
+    "stage4_performance_table",
+    models=(PERFORMANCE_MODEL, PERFORMANCE_FALLBACK_MODEL),
+)
 
 # JSON Schemas for LLM response validation
 PROMPT_1A_SCHEMA = {
@@ -680,7 +683,7 @@ def _call_llm(
             {"role": "system", "content": prompt_text},
             {"role": "user", "content": user_content}
         ],
-        "timeout": 120.0
+        "timeout": LLM_TIMEOUT_SECONDS_LONG
     }
     if use_strict_json and schema:
         request_kwargs["response_format"] = {

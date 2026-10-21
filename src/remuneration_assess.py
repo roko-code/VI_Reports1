@@ -24,7 +24,7 @@ from citation_check import check_citations, format_problems
 from disclosure_check import check_disclosed_realised
 from news_search_results import load_news_block, has_news_results
 from ar_file_lookup import find_ar_file as _find_ar_file_lookup
-from llm_config import rem_assess_models
+from llm_config import LLM_TIMEOUT_SECONDS, rem_assess_models
 from rate_limiter import get_bucket, rate_limited_call, RateLimitExceeded
 
 load_dotenv(find_dotenv())
@@ -53,7 +53,10 @@ PRIOR_AR_BUDGET_CHARS = int(os.getenv("PRIOR_AR_BUDGET_CHARS", "120000"))
 NOM_BUDGET_CHARS = int(os.getenv("NOM_BUDGET_CHARS", "120000"))
 
 # Shared rate limiter bucket for Stage 5
-_rate_bucket = get_bucket("stage5_remuneration")
+_rate_bucket = get_bucket(
+    "stage5_remuneration",
+    models=(REM_ASSESS_PRIMARY_MODEL, REM_ASSESS_FALLBACK_MODEL),
+)
 
 
 def _load_prompt(filename: str) -> str:
@@ -268,7 +271,7 @@ def _call_llm_text(
             {"role": "system", "content": prompt_text},
             {"role": "user", "content": user_content}
         ],
-        "timeout": 120.0
+        "timeout": LLM_TIMEOUT_SECONDS
     }
 
     primary_error = None
@@ -379,7 +382,7 @@ def _call_llm_text(
             fallback_request_kwargs = {
                 "model": fallback_model,
                 "messages": request_kwargs["messages"],
-                "timeout": 120.0
+                "timeout": LLM_TIMEOUT_SECONDS
             }
 
             try:

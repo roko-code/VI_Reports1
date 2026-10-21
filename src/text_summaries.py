@@ -28,7 +28,7 @@ from openai import OpenAI
 
 from logging_utils import write_supporting_json, write_supporting_text, TechnicalLogger
 from news_search_results import load_news_block
-from llm_config import text_summary_models
+from llm_config import LLM_TIMEOUT_SECONDS, text_summary_models
 from rate_limiter import get_bucket, rate_limited_call, RateLimitExceeded
 
 load_dotenv(find_dotenv())
@@ -43,7 +43,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
 
 # Shared rate limiter bucket for Stage 8
-_rate_bucket = get_bucket("stage8_text_summaries")
+_rate_bucket = get_bucket(
+    "stage8_text_summaries",
+    models=(TEXT_SUMMARY_MODEL, TEXT_SUMMARY_FALLBACK_MODEL),
+)
 
 
 def _load_prompt(filename: str) -> str:
@@ -73,7 +76,7 @@ def _call_llm_text(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content}
         ],
-        "timeout": 120.0
+        "timeout": LLM_TIMEOUT_SECONDS
     }
 
     for attempt in range(max_retries + 1):
@@ -124,7 +127,7 @@ def _call_llm_text(
                     fallback_request_kwargs = {
                         "model": fallback_model,
                         "messages": request_kwargs["messages"],
-                        "timeout": 120.0
+                        "timeout": LLM_TIMEOUT_SECONDS
                     }
                     
                     def make_fallback_call():

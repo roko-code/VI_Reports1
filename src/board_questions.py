@@ -31,7 +31,7 @@ from ar_text_cache import get_ar_pages
 from ar_retrieval import STAGE9_SPECS, build_context, write_manifest
 from news_search_results import load_news_block, has_news_results
 from ar_file_lookup import find_ar_file as _find_ar_file_lookup
-from llm_config import board_questions_models
+from llm_config import LLM_TIMEOUT_SECONDS_LONG, board_questions_models
 from rate_limiter import get_bucket, rate_limited_call, RateLimitExceeded
 
 load_dotenv(find_dotenv())
@@ -50,7 +50,10 @@ PROMPTS_DIR = BASE_DIR / "prompts"
 AR_BUDGET_CHARS = int(os.getenv("AR_BUDGET_CHARS", "150000"))
 
 # Shared rate limiter bucket for Stage 9
-_rate_bucket = get_bucket("stage9_board_questions")
+_rate_bucket = get_bucket(
+    "stage9_board_questions",
+    models=(BOARD_QUESTIONS_MODEL, BOARD_QUESTIONS_FALLBACK_MODEL),
+)
 
 
 def _load_prompt(filename: str) -> str:
@@ -220,7 +223,7 @@ def _call_llm_text(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content}
         ],
-        "timeout": 120.0
+        "timeout": LLM_TIMEOUT_SECONDS_LONG
     }
 
     primary_error = None
@@ -274,7 +277,7 @@ def _call_llm_text(
                 fallback_request_kwargs = {
                     "model": fallback_model,
                     "messages": request_kwargs["messages"],
-                    "timeout": 120.0
+                    "timeout": LLM_TIMEOUT_SECONDS_LONG
                 }
                 
                 def make_fallback_call():

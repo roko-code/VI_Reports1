@@ -15,7 +15,7 @@ from typing import Optional, List, Dict, Any, Tuple
 
 from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
-from llm_config import remediation_models
+from llm_config import LLM_TIMEOUT_SECONDS, remediation_models
 
 load_dotenv(find_dotenv())
 
@@ -146,7 +146,7 @@ Please find the correct value from the source documents. If you cannot find it, 
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": user_content}
                 ],
-                timeout=120.0
+                timeout=LLM_TIMEOUT_SECONDS
             )
             
             content = response.choices[0].message.content

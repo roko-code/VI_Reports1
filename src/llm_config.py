@@ -19,6 +19,14 @@ Stage-specific variables (used when override not set):
 
 import os
 
+# LLM call timeout, in seconds. The free-tier models are slow on large
+# contexts; the longer value is reserved for the three stages that feed a full
+# annual-report retrieval slice (Stage 4, Stage 7 other resolutions, Stage 9
+# board questions). A short timeout with many retries is preferred over a long
+# timeout that blocks on a hung call.
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
+LLM_TIMEOUT_SECONDS_LONG = float(os.getenv("LLM_TIMEOUT_SECONDS_LONG", "300"))
+
 
 def get_model(stage_primary: str, stage_fallback: str = "") -> tuple[str, str]:
     """

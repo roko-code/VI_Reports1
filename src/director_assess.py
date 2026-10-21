@@ -33,7 +33,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
 
 # Shared rate limiter bucket for Stage 6
-_rate_bucket = get_bucket("stage6_director_assess")
+_rate_bucket = get_bucket(
+    "stage6_director_assess",
+    models=(DIRECTOR_ASSESS_PRIMARY_MODEL, DIRECTOR_ASSESS_FALLBACK_MODEL),
+)
 
 
 def load_prompt(filename: str) -> str:
