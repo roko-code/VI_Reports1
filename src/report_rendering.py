@@ -1409,6 +1409,9 @@ def run_report_rendering(
     doc.save(str(output_path))
     logger.info(f"Saved report to {output_path}")
 
+    # Verify rendered document matches upstream JSON sources (report-only)
+    _verify_rendered_vs_json(doc, perf_data, nom_details, rem_markdown, logger)
+
     # Save metadata
     metadata = {
         "ticker": ticker,
@@ -1454,6 +1457,68 @@ Data sources used:
     )
 
     return True
+
+
+def _extract_docx_text(doc) -> str:
+    """Extract all text from a docx document (paragraphs + tables)."""
+    parts = []
+    for para in doc.paragraphs:
+        if para.text.strip():
+            parts.append(para.text)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                if cell.text.strip():
+                    parts.append(cell.text)
+    return "\n".join(parts)
+
+
+def _verify_rendered_vs_json(doc, perf_data: dict, nom_details: dict,
+                              rem_markdown: str, logger=None) -> list[dict]:
+    """Verify rendered docx contains key values from upstream JSON sources.
+
+    Report-only: logs mismatches as INFO, does not block rendering.
+    """
+    issues = []
+    doc_text = _extract_docx_text(doc)
+
+    # Check company name appears
+    company_name = nom_details.get("company_name", "")
+    if company_name and company_name not in doc_text:
+        issues.append({
+            "check": "Rendered vs JSON",
+            "status": "INFO",
+            "detail": "Company name '{}' from NoM JSON not found in rendered document".format(company_name)
+        })
+
+    # Check CEO pay values from perf_data appear in docx
+    if perf_data:
+        ceo_pay = perf_data.get("ceo_realised_pay", {})
+        for fy, pay in ceo_pay.items():
+            val = pay.get("value_m")
+            if val is not None:
+                val_str = "{:.1f}".format(val)
+                if val_str not in doc_text:
+                    issues.append({
+                        "check": "Rendered vs JSON",
+                        "status": "INFO",
+                        "detail": "CEO realised pay FY{} (${:.1f}m) from perf JSON not found in rendered document".format(fy, val)
+                    })
+
+    # Check rem_markdown key sections appear
+    if rem_markdown:
+        if "Realised remuneration" not in doc_text and "realised remuneration" not in doc_text.lower():
+            issues.append({
+                "check": "Rendered vs JSON",
+                "status": "INFO",
+                "detail": "Realised remuneration section from remediation assessment not found in rendered document"
+            })
+
+    if logger:
+        for issue in issues:
+            logger.info("Rendered vs JSON: {}".format(issue["detail"]))
+
+    return issues
 
 
 # Alias for orchestrator compatibility

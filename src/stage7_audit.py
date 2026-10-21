@@ -21,6 +21,8 @@ from news_search_results import load_news_block, has_news_results
 from llm_json import parse_llm_json
 from llm_config import LLM_TIMEOUT_SECONDS, audit_models
 from rate_limiter import get_bucket, rate_limited_call, RateLimitExceeded
+from disclosure_check import check_disclosed_realised, NON_DISCLOSURE_PAT
+from ar_text_cache import get_ar_pages
 
 load_dotenv(find_dotenv())
 
@@ -63,6 +65,117 @@ def _count_uncertain_rows(text: str) -> int:
         if result.lower().startswith("uncertain"):
             count += 1
     return count
+
+
+def _get_included_pages_from_manifest(workspace_dir: Path) -> list[int]:
+    """Read included page numbers from Stage 5 retrieval manifest."""
+    manifest_path = (
+        workspace_dir / "supporting_data" / "stage5_remuneration"
+        / "retrieval_manifest_stage5.json"
+    )
+    if not manifest_path.exists():
+        return []
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+        pages: set[int] = set()
+        for section in manifest.get("sections", []):
+            for p in section.get("selected_pages", []):
+                pages.add(p)
+        return sorted(pages)
+    except Exception:
+        return []
+
+
+def _check_disclosure_not_missed(workspace_dir: Path, logger=None) -> list[dict]:
+    """Probe Stage 5 output for 'extractor missed a value' false non-disclosure.
+
+    Stage 5 may claim ``not_disclosed`` / ``no_realised_disclosure`` when a
+    disclosed CEO realised-remuneration row actually exists on a supplied page.
+    This probe runs ``disclosure_check.check_disclosed_realised()`` against the
+    remediation assessment output and the AR pages Stage 5 actually saw.
+
+    Returns CRITICAL issues when a disclosed row is found but the output claims
+    non-disclosure.  Genuine non-disclosure (no disclosed row on any supplied
+    page, e.g. an em-dash cell in the realised table) produces no issue.
+    """
+    issues: list[dict] = []
+
+    rem_assess_md = list((workspace_dir / "reports").glob("*Remuneration_Assessment.md"))
+    if not rem_assess_md:
+        return issues
+
+    try:
+        output_text = rem_assess_md[0].read_text(encoding="utf-8")
+    except Exception:
+        return issues
+
+    # Only probe if output claims non-disclosure
+    if not output_text or not NON_DISCLOSURE_PAT.search(output_text):
+        return issues
+
+    # Get included pages from Stage 5 retrieval manifest
+    included_pages = _get_included_pages_from_manifest(workspace_dir)
+    if not included_pages:
+        return issues
+
+    # Identify ticker/year from workspace name
+    match = re.match(r"([A-Z]+)_(\d{4})", workspace_dir.name)
+    if not match:
+        return issues
+    ticker = match.group(1).upper()
+    year = int(match.group(2))
+
+    pdf_path = workspace_dir / "annual_reports" / f"{ticker}_{year}_AR.pdf"
+
+    # Load AR pages from cache (Stage 5 already populated it).
+    # Fall back to reading the cache JSON directly when the PDF is absent
+    # from the workspace (e.g. in tests or workspaces without AR downloads).
+    ar_pages = None
+    if pdf_path.exists():
+        try:
+            ar_pages = get_ar_pages(ticker, year, pdf_path, logger=logger)
+        except Exception as err:
+            if logger:
+                logger.warning(f"Disclosure probe: get_ar_pages failed: {err}")
+    if ar_pages is None:
+        cache_path = (
+            Path(__file__).resolve().parent.parent
+            / "data" / "_cache" / "annual_report_text"
+            / f"{ticker}_{year}.json"
+        )
+        if cache_path.exists():
+            try:
+                import json as _json
+                with open(cache_path, encoding="utf-8") as f:
+                    cache_data = _json.load(f)
+                ar_pages = cache_data.get("pages", [])
+            except Exception as err:
+                if logger:
+                    logger.warning(f"Disclosure probe: cache read failed: {err}")
+                return issues
+        else:
+            return issues
+
+    included_set = set(included_pages)
+    supplied_pages = {
+        p.get("page_number"): (p.get("text") or "")
+        for p in ar_pages
+        if p.get("page_number") in included_set
+    }
+
+    if not supplied_pages:
+        return issues
+
+    problems = check_disclosed_realised(output_text, supplied_pages)
+    for problem in problems:
+        issues.append({
+            "check": "Disclosure not missed",
+            "status": "CRITICAL",
+            "detail": f"Remuneration assessment claims not_disclosed but a disclosed CEO realised row exists: {problem}"
+        })
+
+    return issues
 
 
 def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
@@ -249,6 +362,11 @@ def _auto_validate(workspace_dir: Path, logger=None) -> List[Dict[str, Any]]:
                 if uncertain_md > 2:
                     issues.append({"check": "Remuneration assessment", "status": "WARN",
                                 "detail": f"{uncertain_md} assessment rows in the markdown return 'Uncertain'"})
+
+            # Probe: did Stage 5 miss a disclosed value by claiming not_disclosed?
+            # Genuine non-disclosure (e.g. em-dash cell, no disclosed row) yields
+            # no issue.  Only a disclosed row on a supplied page triggers CRITICAL.
+            issues.extend(_check_disclosure_not_missed(workspace_dir, logger))
         except Exception as e:
             issues.append({"check": "Remuneration assessment", "status": "WARN", "detail": f"Cannot parse JSON: {e}"})
     
