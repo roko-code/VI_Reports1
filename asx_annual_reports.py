@@ -546,10 +546,6 @@ class ASXDownloaderApp:
             return
 
         codes = [c.strip().upper() for c in codes_raw.split(",") if c.strip()]
-        invalid = [c for c in codes if not re.match(r"^[A-Z]{3,4}$", c)]
-        if invalid:
-            messagebox.showwarning("Invalid Codes", f"Invalid ASX codes: {', '.join(invalid)}")
-            return
 
         start_y = self.start_year.get()
         end_y = self.end_year.get()
